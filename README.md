@@ -1,6 +1,6 @@
 # RISC-V Core — CPU Pipeline + AI Accelerator
 
-A learning-oriented RISC-V RV32I processor implementation in Verilog, built from scratch to understand CPU microarchitecture and the intersection of classical CPU design with modern AI hardware.
+A RISC-V RV32I processor implementation in Verilog, built from scratch to understand CPU microarchitecture and the intersection of classical CPU design with modern AI hardware.
 
 ## What Is This?
 
