@@ -74,8 +74,20 @@ wire        zero_MEM;
 wire [31:0] ALU_result_MEM, RD2_MEM, BranchTarget_MEM;
 wire [4:0]  RD_MEM;
 // Computed in Memory
-wire [31:0] MemData_MEM;       // data memory read output
+wire [31:0] MemData_MEM;       // muxed read output (data memory OR NPU)
 wire        PCSrc_MEM;          // branch AND zero → selects branch target
+
+// Step 8+9: NPU address decoding
+// Bit 8 of the address selects the device:
+//   0 = Data Memory (addresses 0–255)
+//   1 = NPU         (addresses 256+)
+wire        npu_select = ALU_result_MEM[8];
+wire        dmem_MemWrite = MemWrite_MEM & ~npu_select;
+wire        dmem_MemRead  = MemRead_MEM  & ~npu_select;
+wire        npu_MemWrite  = MemWrite_MEM &  npu_select;
+wire        npu_MemRead   = MemRead_MEM  &  npu_select;
+wire [31:0] dmem_data_out;     // data memory read output
+wire [31:0] npu_data_out;      // NPU read output
 
 // ────────────────── WB stage wires ──────────────────
 // From MEM/WB register outputs
@@ -323,17 +335,31 @@ EX_MEM_Reg EXMEM(
 
 // ╔══════════════════════════════════════════════════╗
 // ║                MEM — MEMORY                       ║
+// ║  (with NPU integration — Steps 8+9)               ║
 // ╚══════════════════════════════════════════════════╝
 
-// Data Memory
+// Data Memory — only active when address is in data memory range
 Data_Memory Data_mem(
     .clk(clk), .reset(reset),
-    .MemWrite(MemWrite_MEM),
-    .MemRead(MemRead_MEM),
+    .MemWrite(dmem_MemWrite),
+    .MemRead(dmem_MemRead),
     .read_address(ALU_result_MEM),
     .Write_data(RD2_MEM),
-    .MemData_out(MemData_MEM)
+    .MemData_out(dmem_data_out)
 );
+
+// NPU — only active when address is in NPU range (bit 8 set)
+NPU_Top npu(
+    .clk(clk), .reset(reset),
+    .mem_write(npu_MemWrite),
+    .mem_read(npu_MemRead),
+    .address(ALU_result_MEM[7:0]),   // lower 8 bits as NPU offset
+    .write_data(RD2_MEM),
+    .read_data(npu_data_out)
+);
+
+// Mux read data: NPU or Data Memory based on address
+assign MemData_MEM = npu_select ? npu_data_out : dmem_data_out;
 
 // Branch decision: Branch AND zero → PCSrc
 AND_logic AND_branch(
