@@ -1,0 +1,12 @@
+# Questa / ModelSim
+work/
+transcript
+*.wlf
+wlft*
+*.cr.mti
+*.mpf
+
+# General
+*.log
+*.bak
+*~
