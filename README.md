@@ -87,88 +87,100 @@ The NPU is a memory-mapped AI accelerator integrated into the CPU's memory stage
 | `rtl/common/reg_file.v` | 32x32 register file (x0 hardwired to 0) |
 | `tb/tb_pipeline_top.v` | Self-checking testbench for the pipeline |
 
-## Simulation (Questa / ModelSim)
+## SoC Verification Guide (CPU + NPU)
 
-### Compile all source files
+This guide walks through the end-to-end verification flow for testing the pipelined CPU and the memory-mapped Systolic Array NPU using the Python assembler.
 
+### 1. CPU Pipeline Test (`cpu_test.s`)
+
+We created `assembler/cpu_test.s` which acts as our "torture test" for the pipeline. It is intentionally designed to trigger pipeline stalls, data forwarding, and branch flushing. 
+
+#### What it tests:
+* **I-Type & R-Type**: Basic arithmetic (`add`, `sub`, `addi`) and bitwise logic (`and`, `or`).
+* **Forwarding Hazards**: Back-to-back dependent registers force the pipeline to forward data from the EX/MEM and MEM/WB stages.
+* **Load-Use Hazards**: A `sw` followed by a `lw` and an immediate `add` operation using the loaded value inserts a 1-cycle stall bubble.
+* **Control Hazards**: Forward/backward branches test 3-cycle pipeline flushes.
+
+#### Running the CPU Test
 ```bash
-vlog rtl/common/*.v rtl/pipeline/*.v tb/tb_pipeline_top.v
+python assembler/assembler.py assembler/cpu_test.s assembler/cpu_test.hex
+vlog rtl/common/*.v rtl/pipeline/*.v tb/tb_cpu_e2e.v
+vsim -c tb_cpu_e2e -do "run -all; quit"
 ```
 
-### Run the testbench
+---
 
+### 2. NPU Integration Test (`npu_test.s`)
+
+We created `assembler/npu_test.s` to verify that the CPU can successfully communicate with the NPU using memory-mapped I/O (MMIO).
+
+#### NPU Memory Map
+The NPU is activated when the memory address is >= 256 (Bit 8 is set).
+* **Matrix A (16 bytes)**: Address `256` to `271`
+* **Matrix B (16 bytes)**: Address `272` to `287`
+* **Matrix C (16 words)**: Address `288` to `303` (Read-only)
+* **Start Register**: Address `304` (Write 1 to start)
+* **Status Register**: Address `305` (Read bit 0 for done flag)
+
+#### What it tests:
+1. Writes a 1x2 matrix to A: `A[0][0] = 2`, `A[0][1] = 4`
+2. Writes a 2x1 matrix to B: `B[0][0] = 3`, `B[1][0] = 5`
+3. Triggers the NPU start flag.
+4. Executes a `lw` / `beq` polling loop to wait for the NPU status flag.
+5. Reads `C[0][0]` back from the NPU (Computes 2*3 + 4*5 = 26).
+
+#### Running the NPU Test
 ```bash
-vsim -c tb_top -do "run -all; quit"
+python assembler/assembler.py assembler/npu_test.s assembler/npu_test.hex
+vlog rtl/common/*.v rtl/pipeline/*.v rtl/npu/*.v tb/tb_npu_e2e.v
+vsim -c tb_npu_e2e -do "run -all; quit"
 ```
 
-### Interactive simulation (with waveforms)
+#### Expected Output
+Both testbenches provide clean, cycle-by-cycle logging of register writes, memory writes, and branch flushes. At the end, an automated checker will verify the final states. 
 
-```bash
-vsim tb_top
-add wave -r /*
-run -all
+For the NPU test, you should see:
+```text
+==================================================
+ FINAL VERIFICATION CHECKS
+==================================================
+ PASS | A[0][0] setup (x1 == 2)   | got 2
+ PASS | A[0][1] setup (x2 == 4)   | got 4
+ PASS | B[0][0] setup (x3 == 3)   | got 3
+ PASS | B[1][0] setup (x4 == 5)   | got 5
+ PASS | Start bit     (x5 == 1)   | got 1
+ PASS | Done flag     (x6 == 1)   | got 1
+ PASS | Math Result   (x7 == 26)  | got 26
+==================================================
+ Results: 7 PASS, 0 FAIL
 ```
 
-### Expected output
+### 3. Debugging Strategies
 
-```
-══ GROUP 1: FORWARDING TESTS ═══════════════════
-PASS | FWD: add x7=x1+x2   | got 15
-PASS | FWD: sub x8=x7-x3   | got 0
-PASS | FWD: and x9=x7&x4   | got 4
-PASS | FWD: or x11=x8|x5   | got 3
-PASS | FWD: add x12=x1+x1  | got 10
+If you write new assembly programs and they fail, follow this hierarchy of debugging:
 
-══ GROUP 2: LOAD-USE HAZARD TEST ═════════════════
-PASS | LU: lw x13=Mem[4]   | got 42
-PASS | LU: add x14=x13+x1  | got 47
-PASS | LU: add x15=x14+x2  | got 57
+> [!WARNING]
+> Remember to close any existing Questa GUI windows before running `vsim` from the terminal, or you will get a license error!
 
-══ GROUP 3: BRANCH TEST ═════════════════════════
-PASS | BR: add x16=x5+x6   | got 10
-PASS | BR: x17 flushed=0    | got 0
-PASS | BR: x18 flushed=0    | got 0
-PASS | BR: add x19=x3+x4   | got 35
+#### Step 1: Check PC Updating
+Open the waveform viewer (`vsim tb_cpu_e2e` then `add wave -r /*`). 
+* Look at `uut.PC_IF`. Is it incrementing by 4 every clock cycle? 
+* If it stalls forever, check the `Hazard_Detection_Unit`'s `PCWrite` signal. It might be stuck at 0.
 
-══════════════════════════════════════════════════
-Results: 12 PASS, 0 FAIL
-══════════════════════════════════════════════════
-```
+#### Step 2: Check Immediate Generation
+Are I-Type instructions generating the correct values? Look at `uut.ImmGen.Imm_out`. If a negative offset (like `-1` in a loop counter) is being misinterpreted as a massive positive number, your Sign Extension logic is broken.
 
-### NPU Integration Test
+#### Step 3: Check Forwarding
+If a math operation yields the wrong result, but the instruction *before* it calculated the right one, the Forwarding Unit is broken.
+* Inspect `uut.Forwarding_Unit.ForwardA` and `ForwardB`.
+* `00` means it's reading from the register file.
+* `10` means it's forwarding from EX/MEM (the instruction immediately preceding).
+* `01` means it's forwarding from MEM/WB (the instruction two steps back).
 
-To test the Systolic Array NPU and the memory-mapped CPU interface, run the NPU testbench:
-
-```bash
-# Compile
-vlog rtl/common/*.v rtl/pipeline/*.v rtl/npu/*.v tb/tb_npu_integration.v
-
-# Run command-line simulation
-vsim -c tb_npu_integration -do "run -all; quit"
-
-# Run interactive GUI simulation
-vsim tb_npu_integration
-add wave -r /*
-run -all
-```
-
-**Expected NPU Output:**
-
-```
-══ TEST 1: NPU ISOLATION (Direct Access) ═════════
-  Checking all 16 result elements...
-  PASS | C[0][0] = 1
-  ...
-  PASS | C[3][3] = 64
-
-══ TEST 2: CPU-DRIVEN FLOW (sw/lw) ═══════════════
-  PASS | CPU: NPU status=done   | got 1
-  PASS | CPU: C[0][0]=1*5=5     | got 5
-
-══════════════════════════════════════════════════
-Results: 18 PASS, 0 FAIL
-══════════════════════════════════════════════════
-```
+#### Step 4: Check Branch Flushing
+If a branch is taken, but the instructions *immediately following it* in the assembly file still execute and corrupt your registers, your flush logic is broken.
+* A taken branch sets `uut.PCSrc_MEM = 1`. 
+* This should force `IF_Flush`, `ID_Flush`, and `EX_Flush` to 1 on the next clock edge, replacing the instructions in the pipeline with `0x00000000` (NOPs). Verify this happens in the waveform.
 
 ### Python Assembler
 
