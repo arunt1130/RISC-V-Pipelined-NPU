@@ -22,7 +22,7 @@ begin
     end 
 end
 
-assign read_data1 = Registers[Rs1];
-assign read_data2 = Registers[Rs2];
+assign read_data1 = (RegWrite && (Rd != 0) && (Rd == Rs1)) ? Write_data : Registers[Rs1];
+assign read_data2 = (RegWrite && (Rd != 0) && (Rd == Rs2)) ? Write_data : Registers[Rs2];
 
 endmodule
