@@ -1,15 +1,14 @@
-# RISC-V Core — From Single-Cycle to Pipelined Processor
+# RISC-V Core — CPU Pipeline + AI Accelerator
 
-A learning-oriented RISC-V RV32I processor implementation in Verilog, built from scratch to understand CPU microarchitecture and AI hardware design.
+A learning-oriented RISC-V RV32I processor implementation in Verilog, built from scratch to understand CPU microarchitecture and the intersection of classical CPU design with modern AI hardware.
 
 ## What Is This?
 
-This project implements a **RISC-V RV32I processor** in two stages of increasing complexity:
+This project implements a **RISC-V RV32I processor** spanning three stages of increasing complexity:
 
 1. **Single-cycle** — one instruction per clock cycle, simplest possible datapath
 2. **5-stage pipelined** — overlapping execution with hazard detection, data forwarding, and branch flushing
-
-The long-term goal is to integrate a **systolic array NPU** (neural processing unit) as a memory-mapped accelerator attached to the CPU, combining classical CPU design with AI hardware.
+3. **Systolic array NPU** — a 4x4 matrix multiplication AI accelerator integrated directly into the CPU as a memory-mapped coprocessor
 
 ## Architecture Overview
 
@@ -44,6 +43,19 @@ The long-term goal is to integrate a **systolic array NPU** (neural processing u
 | **S-type** | `sw` |
 | **SB-type** | `beq` |
 
+### Systolic Array NPU
+
+The NPU is a memory-mapped AI accelerator integrated into the CPU's memory stage. At its core is a **4×4 grid of MAC (Multiply-Accumulate) units**. 
+
+* **Memory-Mapped Interface**: Addresses `256–305` route to the NPU instead of Data Memory.
+  * `256–271`: Matrix A storage
+  * `272–287`: Matrix B storage
+  * `288–303`: Matrix C (read-only result)
+  * `304`: Control register (write `1` to start)
+  * `305`: Status register (read bit 0 for `done`)
+* **Data Flow**: To compute a matrix multiplication in hardware, data is fed into the array in a **skewed** format. Row *i* is delayed by *i* clock cycles, and Column *j* is delayed by *j* clock cycles. This ensures the correct elements meet inside the grid at the exact right time.
+* **Speed**: A 4x4 matrix multiplication takes exactly **10 clock cycles** (`3N-2`) inside the NPU, drastically faster than traditional CPU instructions.
+
 ## Directory Structure
 
 ```
@@ -51,9 +63,14 @@ The long-term goal is to integrate a **systolic array NPU** (neural processing u
 │   ├── common/          # Shared modules (ALU, RegFile, Control, memories, muxes)
 │   ├── single_cycle/    # Single-cycle top module (placeholder — to be restored)
 │   ├── pipeline/        # Pipeline registers, forwarding unit, hazard detection, top module
-│   └── npu/             # Systolic array NPU (planned)
-├── tb/                  # Testbenches
-├── assembler/           # Python RISC-V assembler (planned)
+│   └── npu/             # Systolic array NPU (MAC unit, 4x4 array, controller)
+├── tb/                  # Testbenches (includes pipeline and NPU integration)
+├── assembler/
+│   ├── assembler.py     # Main CLI entry point
+│   ├── encoder.py       # Instruction format bitwise encoders
+│   ├── isa.py           # Opcode, funct3, funct7, and register definitions
+│   ├── parser.py        # Text parser and label resolution
+│   └── test.s           # Example assembly program
 ├── docs/                # Documentation
 └── .gitignore
 ```
@@ -118,14 +135,64 @@ Results: 12 PASS, 0 FAIL
 ══════════════════════════════════════════════════
 ```
 
+### NPU Integration Test
+
+To test the Systolic Array NPU and the memory-mapped CPU interface, run the NPU testbench:
+
+```bash
+# Compile
+vlog rtl/common/*.v rtl/pipeline/*.v rtl/npu/*.v tb/tb_npu_integration.v
+
+# Run command-line simulation
+vsim -c tb_npu_integration -do "run -all; quit"
+
+# Run interactive GUI simulation
+vsim tb_npu_integration
+add wave -r /*
+run -all
+```
+
+**Expected NPU Output:**
+
+```
+══ TEST 1: NPU ISOLATION (Direct Access) ═════════
+  Checking all 16 result elements...
+  PASS | C[0][0] = 1
+  ...
+  PASS | C[3][3] = 64
+
+══ TEST 2: CPU-DRIVEN FLOW (sw/lw) ═══════════════
+  PASS | CPU: NPU status=done   | got 1
+  PASS | CPU: C[0][0]=1*5=5     | got 5
+
+══════════════════════════════════════════════════
+Results: 18 PASS, 0 FAIL
+══════════════════════════════════════════════════
+```
+
+### Python Assembler
+
+This repository includes a custom, modular RV32I assembler written in Python that can convert `.s` assembly files into a `.hex` file to be loaded into the Verilog instruction memory using `$readmemh()`.
+
+```bash
+# Run the assembler on the test file
+python assembler/assembler.py assembler/test.s output.hex
+```
+
+The assembler handles:
+* **Standard instructions**: `add, sub, and, or, addi, lw, sw, beq`
+* **Pseudoinstructions**: `nop`
+* **Label resolution**: Forward and backward branches (e.g. `loop:`, `beq x1, x2, loop`)
+* **Standard registers and ABIs**: `x0-x31`, `zero`, `sp`, `a0`, `t0`, etc.
+
 ## Roadmap
 
 - [x] Single-cycle RV32I processor
 - [x] 5-stage pipeline with forwarding
 - [x] Hazard detection (load-use stalling)
 - [x] Branch flushing (assume not taken)
-- [ ] Systolic array NPU (memory-mapped)
-- [ ] Python assembler
+- [x] Systolic array NPU (memory-mapped)
+- [x] Python assembler
 - [ ] Extended ISA support (shifts, comparisons, jumps)
 
 ## Tools

@@ -49,7 +49,7 @@ localparam COMPUTE = 2'b10;  // feeding skewed data (7 cycles)
 localparam DONE    = 2'b11;  // results ready
 
 reg [1:0] state;
-reg [2:0] cycle_count;  // 0–6 for 7 compute cycles
+reg [3:0] cycle_count;  // 0–9 for 10 compute cycles
 
 // Start pulse — fires the cycle the CPU writes 1 to the control register
 wire start_pulse = mem_write && (address == 8'd48) && write_data[0];
@@ -74,11 +74,11 @@ always @(posedge clk or posedge reset) begin
             CLEAR: begin
                 // One cycle to zero all accumulators
                 state       <= COMPUTE;
-                cycle_count <= 3'b0;
+                cycle_count <= 4'b0;
             end
             COMPUTE: begin
-                if (cycle_count == 3'd6) begin
-                    // All 7 cycles complete (0–6)
+                if (cycle_count == 4'd9) begin
+                    // All 10 cycles complete (0–9)
                     state <= DONE;
                 end
                 else begin

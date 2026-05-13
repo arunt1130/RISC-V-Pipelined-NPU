@@ -92,8 +92,8 @@ initial begin
     uut.npu.state = 2'b01;  // CLEAR
     uut.npu.cycle_count = 3'b0;
 
-    // Wait for CLEAR (1 cycle) + COMPUTE (7 cycles) + 1 margin
-    repeat(10) @(posedge clk);
+    // Wait for CLEAR (1 cycle) + COMPUTE (10 cycles) + margin
+    repeat(15) @(posedge clk);
     #1;
 
     // ── Verify results ──────────────────────────────────
@@ -151,7 +151,7 @@ initial begin
     // I[3]: sw   x1, 272(x0)      → NPU B[0][0] = 5
     // I[4]: addi x1, x0, 1        → x1 = 1 (start signal)
     // I[5]: sw   x1, 304(x0)      → NPU control = 1 (START!)
-    // I[6]: NOP (let NPU compute — 9 cycles: CLEAR + 7 COMPUTE + margin)
+    // I[6]: NOP (let NPU compute — 13 cycles: CLEAR + 10 COMPUTE + margin)
     // I[7]-I[15]: NOPs (wait for NPU)
     // I[16]: lw  x2, 305(x0)      → read NPU status (done)
     // I[17]: lw  x6, 288(x0)      → read NPU C[0][0]
@@ -182,13 +182,17 @@ initial begin
     uut.Inst_Memory.I_Mem[13] = 32'h00000000;
     uut.Inst_Memory.I_Mem[14] = 32'h00000000;
     uut.Inst_Memory.I_Mem[15] = 32'h00000000;
+    uut.Inst_Memory.I_Mem[16] = 32'h00000000;
+    uut.Inst_Memory.I_Mem[17] = 32'h00000000;
+    uut.Inst_Memory.I_Mem[18] = 32'h00000000;
+    uut.Inst_Memory.I_Mem[19] = 32'h00000000;
     // lw x2, 305(x0) → I-type load: imm=305=0x131=12'b000100110001
     // imm=000100110001, rs1=x0=00000, funct3=010, rd=x2=00010
-    uut.Inst_Memory.I_Mem[16] = 32'b000100110001_00000_010_00010_0000011;
+    uut.Inst_Memory.I_Mem[20] = 32'b000100110001_00000_010_00010_0000011;
     // lw x6, 288(x0) → imm=288=0x120=12'b000100100000
-    uut.Inst_Memory.I_Mem[17] = 32'b000100100000_00000_010_00110_0000011;
+    uut.Inst_Memory.I_Mem[21] = 32'b000100100000_00000_010_00110_0000011;
     // NOP padding
-    uut.Inst_Memory.I_Mem[18] = 32'h00000000;
+    uut.Inst_Memory.I_Mem[22] = 32'h00000000;
 
     // Run the pipeline long enough for all instructions + NPU computation
     // 18 instructions × ~6 cycles each + NPU time = ~120 cycles is plenty
