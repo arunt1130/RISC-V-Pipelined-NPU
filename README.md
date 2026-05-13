@@ -93,7 +93,7 @@ This guide walks through the end-to-end verification flow for testing the pipeli
 
 ### 1. CPU Pipeline Test (`cpu_test.s`)
 
-We created `assembler/cpu_test.s` which acts as our "torture test" for the pipeline. It is intentionally designed to trigger pipeline stalls, data forwarding, and branch flushing. 
+I created `assembler/cpu_test.s` which acts as our "torture test" for the pipeline. It is intentionally designed to trigger pipeline stalls, data forwarding, and branch flushing. 
 
 #### What it tests:
 * **I-Type & R-Type**: Basic arithmetic (`add`, `sub`, `addi`) and bitwise logic (`and`, `or`).
@@ -112,7 +112,7 @@ vsim -c tb_cpu_e2e -do "run -all; quit"
 
 ### 2. NPU Integration Test (`npu_test.s`)
 
-We created `assembler/npu_test.s` to verify that the CPU can successfully communicate with the NPU using memory-mapped I/O (MMIO).
+I created `assembler/npu_test.s` to verify that the CPU can successfully communicate with the NPU using memory-mapped I/O (MMIO).
 
 #### NPU Memory Map
 The NPU is activated when the memory address is >= 256 (Bit 8 is set).
@@ -159,9 +159,6 @@ For the NPU test, you should see:
 
 If you write new assembly programs and they fail, follow this hierarchy of debugging:
 
-> [!WARNING]
-> Remember to close any existing Questa GUI windows before running `vsim` from the terminal, or you will get a license error!
-
 #### Step 1: Check PC Updating
 Open the waveform viewer (`vsim tb_cpu_e2e` then `add wave -r /*`). 
 * Look at `uut.PC_IF`. Is it incrementing by 4 every clock cycle? 
@@ -205,7 +202,6 @@ The assembler handles:
 - [x] Branch flushing (assume not taken)
 - [x] Systolic array NPU (memory-mapped)
 - [x] Python assembler
-- [ ] Extended ISA support (shifts, comparisons, jumps)
 
 ## Tools
 
