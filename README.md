@@ -94,9 +94,9 @@ This guide walks through the end-to-end verification flow for testing the pipeli
 
 ### 1. C++ Simulation Harness (`sim/sim_main.cpp`)
 
-We use **Verilator** to compile the Verilog RTL into a cycle-accurate C++ model. The `sim_main.cpp` program acts as the Host, driving the clock, injecting payloads into the CPU over Memory-Mapped I/O, and waiting for the hardware to process and return neural network inferences.
+**Verilator** is used to compile the Verilog RTL into a cycle-accurate C++ model. The `sim_main.cpp` program acts as the Host, driving the clock, injecting payloads into the CPU over Memory-Mapped I/O, and waiting for the hardware to process and return neural network inferences.
 
-I created `assembler/cpu_test.s` which acts as our "torture test" for the pipeline. It is intentionally designed to trigger pipeline stalls, data forwarding, and branch flushing. 
+I created `assembler/cpu_test.s` which acts as the "torture test" for the pipeline. It is intentionally designed to trigger pipeline stalls, data forwarding, and branch flushing. 
 
 #### What it tests:
 * **I-Type & R-Type**: Basic arithmetic (`add`, `sub`, `addi`) and bitwise logic (`and`, `or`).
@@ -109,7 +109,7 @@ I created `assembler/cpu_test.s` which acts as our "torture test" for the pipeli
 The firmware acts as the bridge between the Host software and the NPU hardware.
 
 #### Memory Map Extensions
-The NPU is activated when the memory address is >= 256 (Bit 8 is set). We expanded this to include the Host interface:
+The NPU is activated when the memory address is >= 256 (Bit 8 is set). This was expanded to include the Host interface:
 * **Matrix A (16 bytes)**: Address `256` to `271`
 * **Matrix B (16 bytes)**: Address `272` to `287`
 * **Matrix C (16 words)**: Address `288` to `303` (Read-only)
@@ -149,32 +149,6 @@ You will see the Host program boot the SoC, inject the payload, and wait for the
 [Host] Math verified correctly! 2*3 + 4*10 = 46
 [Host] Simulation completed successfully.
 ```
-
-### 4. Debugging Strategies
-
-If you write new assembly programs and they fail, follow this hierarchy of debugging:
-
-> [!WARNING]
-> Verilator does not automatically capture waveforms like Questa. To debug internally, either add `$display` statements in the Verilog or enable VCD tracing in `sim_main.cpp`.
-
-#### Step 1: Check PC Updating
-* Add a `$display` in `instruction_mem.v` to print the PC every cycle. Is it incrementing by 4? 
-* If it stalls forever, check the `Hazard_Detection_Unit`'s `stall` signal. Remember that if a branch is taken (`PCSrc_MEM == 1`), it should override and un-stall the PC!
-
-#### Step 2: Check Immediate Generation
-Are I-Type instructions generating the correct values? Look at `uut.ImmGen.Imm_out`. If a negative offset (like `-1` in a loop counter) is being misinterpreted as a massive positive number, your Sign Extension logic is broken.
-
-#### Step 3: Check Forwarding
-If a math operation yields the wrong result, but the instruction *before* it calculated the right one, the Forwarding Unit is broken.
-* Inspect `uut.Forwarding_Unit.ForwardA` and `ForwardB`.
-* `00` means it's reading from the register file.
-* `10` means it's forwarding from EX/MEM (the instruction immediately preceding).
-* `01` means it's forwarding from MEM/WB (the instruction two steps back).
-
-#### Step 4: Check Branch Flushing
-If a branch is taken, but the instructions *immediately following it* in the assembly file still execute and corrupt your registers, your flush logic is broken.
-* A taken branch sets `uut.PCSrc_MEM = 1`. 
-* This should force `IF_Flush`, `ID_Flush`, and `EX_Flush` to 1 on the next clock edge, replacing the instructions in the pipeline with `0x00000000` (NOPs). Verify this happens in the waveform.
 
 ### Python Assembler
 
