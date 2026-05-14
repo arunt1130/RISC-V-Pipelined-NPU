@@ -9,8 +9,13 @@
 //   _MEM = produced in Memory
 //   _WB  = produced in Writeback
 // ══════════════════════════════════════════════════════════════
-module top(clk, reset);
-input clk, reset;
+module top(
+    input clk, reset,
+    // Host MMIO interface (Mapped to Address >= 512, Bit 9)
+    output [31:0] host_tx_data,
+    output        host_tx_valid,
+    input  [31:0] host_rx_data
+);
 
 // ── Hazard / flush control wires ────────────────────────────
 // These are now driven by the Hazard Detection Unit and
@@ -77,17 +82,27 @@ wire [4:0]  RD_MEM;
 wire [31:0] MemData_MEM;       // muxed read output (data memory OR NPU)
 wire        PCSrc_MEM;          // branch AND zero → selects branch target
 
-// Step 8+9: NPU address decoding
-// Bit 8 of the address selects the device:
-//   0 = Data Memory (addresses 0–255)
-//   1 = NPU         (addresses 256+)
-wire        npu_select = ALU_result_MEM[8];
-wire        dmem_MemWrite = MemWrite_MEM & ~npu_select;
-wire        dmem_MemRead  = MemRead_MEM  & ~npu_select;
-wire        npu_MemWrite  = MemWrite_MEM &  npu_select;
-wire        npu_MemRead   = MemRead_MEM  &  npu_select;
+// Step 8+9: MMIO address decoding
+// Bit 9: Host Communication (address 512+)
+// Bit 8: NPU (address 256–511)
+// Else:  Data Memory (address 0–255)
+wire        host_select   = ALU_result_MEM[9];
+wire        npu_select    = ALU_result_MEM[8] & ~host_select;
+wire        dmem_select   = ~npu_select & ~host_select;
+
+wire        dmem_MemWrite = MemWrite_MEM & dmem_select;
+wire        dmem_MemRead  = MemRead_MEM  & dmem_select;
+wire        npu_MemWrite  = MemWrite_MEM & npu_select;
+wire        npu_MemRead   = MemRead_MEM  & npu_select;
+
+assign      host_tx_data  = RD2_MEM;
+assign      host_tx_valid = MemWrite_MEM & host_select;
+
 wire [31:0] dmem_data_out;     // data memory read output
 wire [31:0] npu_data_out;      // NPU read output
+
+always @(posedge clk) begin
+end
 
 // ────────────────── WB stage wires ──────────────────
 // From MEM/WB register outputs
@@ -119,7 +134,7 @@ assign flush_IDEX = flush_IDEX_hazard | PCSrc_MEM;
 // Program Counter — now has stall input (Step 6)
 Program_counter PC(
     .clk(clk), .reset(reset),
-    .stall(stall_hazard),       // ← from Hazard Detection Unit
+    .stall(actual_stall),       // ← from Hazard Detection Unit masked by branch
     .PC_in(PC_next),
     .PC_out(PC_IF)
 );
@@ -145,7 +160,7 @@ Instruction_Mem Inst_Memory(
 IF_ID_Reg IFID(
     .clk(clk), .reset(reset),
     .flush(flush_IFID),
-    .stall(stall_hazard),       // ← from Hazard Detection Unit
+    .stall(actual_stall),       // ← masked by branch
     .PC_in(PC_IF),           .PC_out(PC_ID),
     .instruction_in(instruction_IF), .instruction_out(instruction_ID)
 );
@@ -205,6 +220,11 @@ Hazard_Detection_Unit HDU(
     .stall(stall_hazard),
     .flush_IDEX(flush_IDEX_hazard)
 );
+
+wire actual_stall = stall_hazard & ~PCSrc_MEM;
+
+always @(posedge clk) begin
+end
 
 
 // ╔══════════════════════════════════════════════════╗
@@ -358,8 +378,8 @@ NPU_Top npu(
     .read_data(npu_data_out)
 );
 
-// Mux read data: NPU or Data Memory based on address
-assign MemData_MEM = npu_select ? npu_data_out : dmem_data_out;
+// Mux read data: Host, NPU, or Data Memory based on address
+assign MemData_MEM = host_select ? host_rx_data : (npu_select ? npu_data_out : dmem_data_out);
 
 // Branch decision: Branch AND zero → PCSrc
 AND_logic AND_branch(

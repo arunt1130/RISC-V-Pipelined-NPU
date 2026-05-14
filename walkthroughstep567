@@ -1,0 +1,188 @@
+# Walkthrough: Steps 5–7 — Forwarding, Hazard Detection, Branch Handling
+
+## Overview of Changes
+
+Three new modules were created and wired into the pipeline. One existing module was modified. The top module and testbench were rewritten.
+
+| What | File | Lines |
+|------|------|-------|
+| Modified `Program_counter` (added `stall`) | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L1-L18) | 1–18 |
+| New `Forwarding_Unit` | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L255-L300) | 255–300 |
+| New `Mux3to1` | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L303-L321) | 303–321 |
+| New `Hazard_Detection_Unit` | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L324-L360) | 324–360 |
+| Rewritten `top` module | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L578-L965) | 578–965 |
+| New testbench | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L969-L1171) | 969–1171 |
+
+---
+
+## Step 5 — Forwarding (Detailed Explanation)
+
+### The Problem It Solves
+
+```asm
+add x7, x1, x2    # writes x7 = 15 (reaches WB at cycle 6)
+sub x8, x7, x3    # reads x7 — but x7 hasn't been written yet! (needs x7 at cycle 4)
+```
+
+Without forwarding, `sub` reads the OLD value of x7 from the register file (which is 0, not 15). The correct value of x7 IS computed — it's sitting in the ALU result in the EX/MEM register — but nobody is routing it back.
+
+### How Forwarding Fixes It
+
+The **Forwarding Unit** is a combinational block that sits in the Execute stage. Every cycle, it checks:
+
+1. "Is the instruction in **Memory** writing to the same register that I'm reading?" → If yes, grab the value from `ALU_result_MEM`
+2. "Is the instruction in **Writeback** writing to the same register that I'm reading?" → If yes, grab the value from `WriteBack_WB`
+
+It produces two 2-bit selects (`ForwardA` for ALU input A, `ForwardB` for ALU input B):
+
+| Select | Meaning | Data source |
+|--------|---------|-------------|
+| `00` | No hazard | `RD1_EX` / `RD2_EX` (register file) |
+| `10` | Forward from MEM | `ALU_result_MEM` |
+| `01` | Forward from WB | `WriteBack_WB` |
+
+**MEM has priority** because if both MEM and WB want to forward the same register, MEM has the newer value.
+
+### What Was Wired
+
+Two `Mux3to1` instances were added before the ALU:
+- **ForwardA_mux** → feeds ALU input A (was `RD1_EX`, now `ForwardA_data_EX`)
+- **ForwardB_mux** → feeds the ALUSrc mux AND the EX/MEM store data path (was `RD2_EX`, now `ForwardB_data_EX`)
+
+The store data path change is important: when `sw x7, 0(x5)` follows `add x7, ...`, the data to store (x7) also needs forwarding.
+
+---
+
+## Step 6 — Hazard Detection (Detailed Explanation)
+
+### The Problem Forwarding Can't Solve
+
+```asm
+lw  x13, 4(x0)    # x13 won't have its value until END of Memory stage
+add x14, x13, x1  # needs x13 at START of Execute stage — too early!
+```
+
+The load reads from data memory at the END of the MEM stage. But forwarding can only send values that already exist. When `add` enters Execute, `lw` is in Memory — the memory read hasn't completed yet. There's nothing to forward.
+
+### How The Stall Fixes It
+
+The **Hazard Detection Unit** sits in the Decode stage. It looks one stage ahead:
+
+```
+if (MemRead_EX == 1 AND RD_EX matches RS1_ID or RS2_ID)
+    → STALL for 1 cycle
+```
+
+When it stalls:
+1. **PC freezes** — doesn't advance (same instruction re-fetched)
+2. **IF/ID freezes** — holds the same instruction (re-decoded)
+3. **ID/EX flushed** — a bubble (NOP) inserted into Execute
+
+After one stall, the load moves from EX to MEM, and its result becomes available for forwarding on the next cycle.
+
+### What Was Changed
+
+- `Program_counter` got a new `stall` input: `else if(!stall) PC_out <= PC_in;`
+- The `stall_hazard` wire from HDU drives both PC's stall and IF/ID's stall
+- The `flush_IDEX_hazard` wire from HDU is OR'd with the branch flush for ID/EX
+
+---
+
+## Step 7 — Branch Handling (Detailed Explanation)
+
+### The Problem
+
+The branch decision happens in the MEM stage (Branch_MEM AND zero_MEM). By the time we know the branch is taken, we've already fetched 3 wrong instructions into IF/ID, ID/EX, and EX/MEM.
+
+### The Solution: Flush
+
+When `PCSrc_MEM = 1` (branch taken):
+- `flush_IFID = PCSrc_MEM` → squash instruction in IF/ID
+- `flush_IDEX = flush_IDEX_hazard | PCSrc_MEM` → squash instruction in ID/EX
+- `flush_EXMEM = PCSrc_MEM` → squash instruction in EX/MEM
+- PC mux selects the branch target → correct instruction fetched next cycle
+
+The ID/EX flush is OR'd with the hazard detection flush because either a load-use stall OR a branch can insert a bubble.
+
+---
+
+## QuestaSim Commands
+
+```tcl
+# 1. Compile
+vlog "C:/Users/ArunT/OneDrive/Desktop/RISC-V Core/Single_cycle.v"
+
+# 2. Simulate
+vsim -voptargs=+acc work.tb_top
+
+# 3. Add waves for verification
+add wave -divider "CLOCK/RESET"
+add wave sim:/tb_top/clk
+add wave sim:/tb_top/reset
+
+add wave -divider "HAZARD CONTROL"
+add wave sim:/tb_top/uut/stall_hazard
+add wave sim:/tb_top/uut/flush_IFID
+add wave sim:/tb_top/uut/flush_IDEX
+add wave sim:/tb_top/uut/flush_EXMEM
+add wave sim:/tb_top/uut/PCSrc_MEM
+
+add wave -divider "FORWARDING"
+add wave sim:/tb_top/uut/ForwardA_sel
+add wave sim:/tb_top/uut/ForwardB_sel
+add wave sim:/tb_top/uut/ForwardA_data_EX
+add wave sim:/tb_top/uut/ForwardB_data_EX
+
+add wave -divider "IF STAGE"
+add wave -radix unsigned sim:/tb_top/uut/PC_IF
+add wave -radix hex sim:/tb_top/uut/instruction_IF
+
+add wave -divider "ID STAGE"
+add wave -radix unsigned sim:/tb_top/uut/RS1_ID
+add wave -radix unsigned sim:/tb_top/uut/RS2_ID
+add wave -radix unsigned sim:/tb_top/uut/RD_ID
+
+add wave -divider "EX STAGE"
+add wave -radix decimal sim:/tb_top/uut/ALU_result_EX
+add wave -radix unsigned sim:/tb_top/uut/RD_EX
+add wave sim:/tb_top/uut/RegWrite_EX
+
+add wave -divider "MEM STAGE"
+add wave -radix decimal sim:/tb_top/uut/ALU_result_MEM
+add wave -radix unsigned sim:/tb_top/uut/RD_MEM
+add wave sim:/tb_top/uut/RegWrite_MEM
+
+add wave -divider "WB STAGE"
+add wave -radix decimal sim:/tb_top/uut/WriteBack_WB
+add wave -radix unsigned sim:/tb_top/uut/RD_WB
+add wave sim:/tb_top/uut/RegWrite_WB
+
+# 4. Run
+run -all
+```
+
+## What to Look For in Waveforms
+
+### Group 1: Forwarding
+- When `sub x8, x7, x3` is in EX: `ForwardA_sel` = `10` (forwarding x7 from MEM)
+- When `and x9, x7, x4` is in EX: `ForwardA_sel` = `01` (forwarding x7 from WB)
+- No stall signals should assert during Group 1
+
+### Group 2: Load-Use
+- When `lw x13` is in EX and `add x14, x13, x1` is in ID: `stall_hazard` = `1` for exactly 1 cycle
+- `flush_IDEX` = `1` for that same cycle (bubble inserted)
+- PC holds steady for 1 cycle
+- On the next cycle, `ForwardA_sel` = `10` (forwarding loaded value from MEM)
+
+### Group 3: Branch
+- When `beq x5, x5, 12` reaches MEM: `PCSrc_MEM` = `1`
+- `flush_IFID`, `flush_IDEX`, `flush_EXMEM` all go to `1` for that cycle
+- PC jumps to branch target (I_Mem[13] = address 52)
+- x17 and x18 should stay at 0 (flushed instructions never completed)
+
+## Test Results
+
+The testbench prints PASS/FAIL with a summary count at the end. All 11 tests should pass:
+- 5 forwarding tests
+- 3 load-use hazard tests
+- 3 branch tests

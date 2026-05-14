@@ -85,13 +85,16 @@ The NPU is a memory-mapped AI accelerator integrated into the CPU's memory stage
 | `rtl/common/alu.v` | 32-bit ALU (add, sub, and, or) |
 | `rtl/common/control_unit.v` | Main control decoder |
 | `rtl/common/reg_file.v` | 32x32 register file (x0 hardwired to 0) |
-| `tb/tb_pipeline_top.v` | Self-checking testbench for the pipeline |
+| `tb/tb_pipeline_top.v` | Deprecated Verilog testbench |
+| `sim/sim_main.cpp` | **Verilator C++ simulation harness and Host interface** |
 
-## SoC Verification Guide (CPU + NPU)
+## SoC Verification Guide (CPU + NPU + Host)
 
-This guide walks through the end-to-end verification flow for testing the pipelined CPU and the memory-mapped Systolic Array NPU using the Python assembler.
+This guide walks through the end-to-end verification flow for testing the pipelined CPU and the memory-mapped Systolic Array NPU using the Python assembler and our **persistent Verilator C++ environment**.
 
-### 1. CPU Pipeline Test (`cpu_test.s`)
+### 1. C++ Simulation Harness (`sim/sim_main.cpp`)
+
+We use **Verilator** to compile the Verilog RTL into a cycle-accurate C++ model. The `sim_main.cpp` program acts as the Host, driving the clock, injecting payloads into the CPU over Memory-Mapped I/O, and waiting for the hardware to process and return neural network inferences.
 
 I created `assembler/cpu_test.s` which acts as our "torture test" for the pipeline. It is intentionally designed to trigger pipeline stalls, data forwarding, and branch flushing. 
 
@@ -101,68 +104,62 @@ I created `assembler/cpu_test.s` which acts as our "torture test" for the pipeli
 * **Load-Use Hazards**: A `sw` followed by a `lw` and an immediate `add` operation using the loaded value inserts a 1-cycle stall bubble.
 * **Control Hazards**: Forward/backward branches test 3-cycle pipeline flushes.
 
-#### Running the CPU Test
-```bash
-python assembler/assembler.py assembler/cpu_test.s assembler/cpu_test.hex
-vlog rtl/common/*.v rtl/pipeline/*.v tb/tb_cpu_e2e.v
-vsim -c tb_cpu_e2e -do "run -all; quit"
-```
+### 2. NPU Integration & Host Polling (`firmware.s`)
 
----
+The firmware acts as the bridge between the Host software and the NPU hardware.
 
-### 2. NPU Integration Test (`npu_test.s`)
-
-I created `assembler/npu_test.s` to verify that the CPU can successfully communicate with the NPU using memory-mapped I/O (MMIO).
-
-#### NPU Memory Map
-The NPU is activated when the memory address is >= 256 (Bit 8 is set).
+#### Memory Map Extensions
+The NPU is activated when the memory address is >= 256 (Bit 8 is set). We expanded this to include the Host interface:
 * **Matrix A (16 bytes)**: Address `256` to `271`
 * **Matrix B (16 bytes)**: Address `272` to `287`
 * **Matrix C (16 words)**: Address `288` to `303` (Read-only)
 * **Start Register**: Address `304` (Write 1 to start)
 * **Status Register**: Address `305` (Read bit 0 for done flag)
+* **Host RX**: Address `512` (Read from Host C++ software)
+* **Host TX**: Address `512` (Write to Host C++ software)
 
-#### What it tests:
-1. Writes a 1x2 matrix to A: `A[0][0] = 2`, `A[0][1] = 4`
-2. Writes a 2x1 matrix to B: `B[0][0] = 3`, `B[1][0] = 5`
-3. Triggers the NPU start flag.
-4. Executes a `lw` / `beq` polling loop to wait for the NPU status flag.
-5. Reads `C[0][0]` back from the NPU (Computes 2*3 + 4*5 = 26).
+#### Execution Flow:
+1. Firmware polls Address `512` until the Host injects a non-zero command.
+2. Firmware writes matrices to NPU and triggers the start flag.
+3. Executes a `lw` / `beq` polling loop to wait for the NPU status flag.
+4. Reads `C[0][0]` back from the NPU.
+5. Writes the result back to Address `512` which the C++ Host catches.
 
-#### Running the NPU Test
+### 3. Running the Simulation
+
+Everything is automated through the Makefile. You must be in a Linux/WSL environment with Verilator installed.
+
 ```bash
-python assembler/assembler.py assembler/npu_test.s assembler/npu_test.hex
-vlog rtl/common/*.v rtl/pipeline/*.v rtl/npu/*.v tb/tb_npu_e2e.v
-vsim -c tb_npu_e2e -do "run -all; quit"
+# Assemble the firmware
+python assembler/assembler.py assembler/firmware.s assembler/firmware.hex
+
+# Compile the hardware and run the C++ simulation
+make run
 ```
 
 #### Expected Output
-Both testbenches provide clean, cycle-by-cycle logging of register writes, memory writes, and branch flushes. At the end, an automated checker will verify the final states. 
+You will see the Host program boot the SoC, inject the payload, and wait for the hardware to process the NPU workload cycle-by-cycle:
 
-For the NPU test, you should see:
 ```text
-==================================================
- FINAL VERIFICATION CHECKS
-==================================================
- PASS | A[0][0] setup (x1 == 2)   | got 2
- PASS | A[0][1] setup (x2 == 4)   | got 4
- PASS | B[0][0] setup (x3 == 3)   | got 3
- PASS | B[1][0] setup (x4 == 5)   | got 5
- PASS | Start bit     (x5 == 1)   | got 1
- PASS | Done flag     (x6 == 1)   | got 1
- PASS | Math Result   (x7 == 26)  | got 26
-==================================================
- Results: 7 PASS, 0 FAIL
+[RTL] Loading firmware from assembler/firmware.hex
+[RTL] First instruction: 00200093
+[Host] Reset released, SoC running.
+[Host] Cycle 20: Injected Command = 10
+[Host] Cycle 48: Received Response from SoC = 46
+[Host] Math verified correctly! 2*3 + 4*10 = 46
+[Host] Simulation completed successfully.
 ```
 
-### 3. Debugging Strategies
+### 4. Debugging Strategies
 
 If you write new assembly programs and they fail, follow this hierarchy of debugging:
 
+> [!WARNING]
+> Verilator does not automatically capture waveforms like Questa. To debug internally, either add `$display` statements in the Verilog or enable VCD tracing in `sim_main.cpp`.
+
 #### Step 1: Check PC Updating
-Open the waveform viewer (`vsim tb_cpu_e2e` then `add wave -r /*`). 
-* Look at `uut.PC_IF`. Is it incrementing by 4 every clock cycle? 
-* If it stalls forever, check the `Hazard_Detection_Unit`'s `PCWrite` signal. It might be stuck at 0.
+* Add a `$display` in `instruction_mem.v` to print the PC every cycle. Is it incrementing by 4? 
+* If it stalls forever, check the `Hazard_Detection_Unit`'s `stall` signal. Remember that if a branch is taken (`PCSrc_MEM == 1`), it should override and un-stall the PC!
 
 #### Step 2: Check Immediate Generation
 Are I-Type instructions generating the correct values? Look at `uut.ImmGen.Imm_out`. If a negative offset (like `-1` in a loop counter) is being misinterpreted as a massive positive number, your Sign Extension logic is broken.
@@ -202,9 +199,12 @@ The assembler handles:
 - [x] Branch flushing (assume not taken)
 - [x] Systolic array NPU (memory-mapped)
 - [x] Python assembler
+- [x] Host/SoC MMIO integration via C++ testbench
+- [ ] Extended ISA support (shifts, comparisons, jumps)
+- [ ] Full neural network evaluation workload
 
 ## Tools
 
 - **HDL**: Verilog (IEEE 1364-2005)
-- **Simulator**: Questa / ModelSim
+- **Simulator**: Verilator 5+ (C++ model)
 - **ISA**: RISC-V RV32I (subset)
