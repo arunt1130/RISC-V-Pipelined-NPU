@@ -94,9 +94,9 @@ This guide walks through the end-to-end verification flow for testing the pipeli
 
 ### 1. C++ Simulation Harness (`sim/sim_main.cpp`)
 
-We use **Verilator** to compile the Verilog RTL into a cycle-accurate C++ model. The `sim_main.cpp` program acts as the Host, driving the clock, injecting payloads into the CPU over Memory-Mapped I/O, and waiting for the hardware to process and return neural network inferences.
+**Verilator** is used to compile the Verilog RTL into a cycle-accurate C++ model. The `sim_main.cpp` program acts as the Host, driving the clock, injecting payloads into the CPU over Memory-Mapped I/O, and waiting for the hardware to process and return neural network inferences.
 
-I created `assembler/cpu_test.s` which acts as our "torture test" for the pipeline. It is intentionally designed to trigger pipeline stalls, data forwarding, and branch flushing. 
+I created `assembler/cpu_test.s` which acts as the "torture test" for the pipeline. It is intentionally designed to trigger pipeline stalls, data forwarding, and branch flushing. 
 
 #### What it tests:
 * **I-Type & R-Type**: Basic arithmetic (`add`, `sub`, `addi`) and bitwise logic (`and`, `or`).
@@ -109,7 +109,7 @@ I created `assembler/cpu_test.s` which acts as our "torture test" for the pipeli
 The firmware acts as the bridge between the Host software and the NPU hardware.
 
 #### Memory Map Extensions
-The NPU is activated when the memory address is >= 256 (Bit 8 is set). We expanded this to include the Host interface:
+The NPU is activated when the memory address is >= 256 (Bit 8 is set). This was expanded to include the Host interface:
 * **Matrix A (16 bytes)**: Address `256` to `271`
 * **Matrix B (16 bytes)**: Address `272` to `287`
 * **Matrix C (16 words)**: Address `288` to `303` (Read-only)
