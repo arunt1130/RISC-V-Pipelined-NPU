@@ -16,7 +16,11 @@ INSTRUCTIONS = {
     'sw':   {'fmt': 'S',  'opcode': 0x23, 'funct3': 0x2},
     
     'beq':  {'fmt': 'SB', 'opcode': 0x63, 'funct3': 0x0},
-    
+
+    # Jumps (function calls / returns)
+    'jal':  {'fmt': 'UJ', 'opcode': 0x6F},                # jal rd, label
+    'jalr': {'fmt': 'I',  'opcode': 0x67, 'funct3': 0x0}, # jalr rd, imm(rs1)
+
     # Pseudoinstructions
     'nop':  {'fmt': 'pseudo', 'real': 'addi', 'args': ['x0', 'x0', '0']},
 }

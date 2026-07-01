@@ -1,10 +1,12 @@
 # Walkthrough: Pipeline Steps 2.5 & 3
 
+> **Note:** This is a historical development log. The monolithic `Single_cycle.v` it references has since been split into `rtl/common/`, `rtl/pipeline/`, and `rtl/single_cycle/`.
+
 ## Changes Made
 
 ### 1. Added `fun7` and `fun3` to ID/EX Pipeline Register
 
-**File:** [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v)
+**File:** `Single_cycle.v`
 
 **What:** Added two new port pairs to `ID_EX_Reg`:
 - `fun7_in` / `fun7_out` (1-bit) — carries `instruction[30]`

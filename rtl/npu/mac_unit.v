@@ -1,42 +1,46 @@
 // ══════════════════════════════════════════════════════════════
 // MAC Unit — Processing Element for the Systolic Array
 //
-// Each cell in the 4×4 systolic array is one of these.
+// Each cell in the systolic array is one of these.
 // On each enabled clock cycle it:
 //   1. Multiplies a_in × b_in and adds to its accumulator
 //   2. Passes a_in to the right neighbor (a_out)
 //   3. Passes b_in to the cell below (b_out)
 //
-// Data widths:
-//   Inputs:      8-bit (typical for AI inference, like Google's TPU)
-//   Accumulator: 32-bit (prevents overflow: worst case 4×127×127 = 64,516)
+// Data widths (parameterized):
+//   Inputs:      signed DATA_WIDTH-bit (int8, like quantized NN
+//                weights/activations — signed in real inference)
+//   Accumulator: signed ACC_WIDTH-bit (32-bit prevents overflow)
 //
 // Control:
 //   enable — gates computation and data flow
 //   clear  — resets the accumulator to 0 before a new matrix multiply
 // ══════════════════════════════════════════════════════════════
-module MAC_Unit(
-    input        clk, reset, enable, clear,
-    input  [7:0] a_in,       // activation from the left
-    input  [7:0] b_in,       // weight from above
-    output reg [7:0] a_out,  // passed to the right neighbor
-    output reg [7:0] b_out,  // passed to the cell below
-    output reg [31:0] acc    // accumulated result
+module MAC_Unit #(
+    parameter DATA_WIDTH = 8,
+    parameter ACC_WIDTH  = 32
+)(
+    input                              clk, reset, enable, clear,
+    input  signed [DATA_WIDTH-1:0]     a_in,   // activation from the left
+    input  signed [DATA_WIDTH-1:0]     b_in,   // weight from above
+    output reg signed [DATA_WIDTH-1:0] a_out,  // passed to the right neighbor
+    output reg signed [DATA_WIDTH-1:0] b_out,  // passed to the cell below
+    output reg signed [ACC_WIDTH-1:0]  acc     // accumulated result
 );
 
 always @(posedge clk or posedge reset) begin
     if (reset) begin
-        a_out <= 8'b0;
-        b_out <= 8'b0;
-        acc   <= 32'b0;
+        a_out <= {DATA_WIDTH{1'b0}};
+        b_out <= {DATA_WIDTH{1'b0}};
+        acc   <= {ACC_WIDTH{1'b0}};
     end
     else if (clear) begin
         // Zero the accumulator before a new computation.
         // Also zero the pass-throughs so stale data doesn't
         // leak into the array during the next computation.
-        a_out <= 8'b0;
-        b_out <= 8'b0;
-        acc   <= 32'b0;
+        a_out <= {DATA_WIDTH{1'b0}};
+        b_out <= {DATA_WIDTH{1'b0}};
+        acc   <= {ACC_WIDTH{1'b0}};
     end
     else if (enable) begin
         // The core MAC operation: accumulate a×b

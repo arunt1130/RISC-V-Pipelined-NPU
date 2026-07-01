@@ -13,6 +13,7 @@ module EX_MEM_Reg(
     // Control signals
     input        MemtoReg_in, RegWrite_in,
     input        MemRead_in, MemWrite_in, Branch_in,
+    input        Jump_in,
     // Data
     input        zero_in,
     input [31:0] ALU_result_in, RD2_in, BranchTarget_in,
@@ -22,6 +23,7 @@ module EX_MEM_Reg(
     // Control signals out
     output reg        MemtoReg_out, RegWrite_out,
     output reg        MemRead_out, MemWrite_out, Branch_out,
+    output reg        Jump_out,
     // Data out
     output reg        zero_out,
     output reg [31:0] ALU_result_out, RD2_out, BranchTarget_out,
@@ -35,6 +37,7 @@ module EX_MEM_Reg(
             MemRead_out      <= 1'b0;
             MemWrite_out     <= 1'b0;
             Branch_out       <= 1'b0;
+            Jump_out         <= 1'b0;
             zero_out         <= 1'b0;
             ALU_result_out   <= 32'b0;
             RD2_out          <= 32'b0;
@@ -47,6 +50,7 @@ module EX_MEM_Reg(
             MemRead_out      <= MemRead_in;
             MemWrite_out     <= MemWrite_in;
             Branch_out       <= Branch_in;
+            Jump_out         <= Jump_in;
             zero_out         <= zero_in;
             ALU_result_out   <= ALU_result_in;
             RD2_out          <= RD2_in;

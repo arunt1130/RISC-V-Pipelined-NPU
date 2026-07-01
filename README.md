@@ -33,6 +33,7 @@ This project implements a **RISC-V RV32I processor** spanning three stages of in
 | **Data hazard** (R-R) | `add x1,x2,x3` → `sub x4,x1,x5` | Forwarding from MEM/WB stages |
 | **Load-use** | `lw x1,0(x2)` → `add x3,x1,x4` | 1-cycle stall + forwarding |
 | **Control** (branch) | `beq x1,x2,target` | Assume not taken, flush on taken (3-cycle penalty) |
+| **Control** (jump) | `jal ra,func` / `jalr x0,0(ra)` | Resolved in MEM like branches, always flush (3-cycle penalty) |
 
 ### Supported Instructions
 
@@ -42,10 +43,14 @@ This project implements a **RISC-V RV32I processor** spanning three stages of in
 | **I-type** | `addi`, `lw` |
 | **S-type** | `sw` |
 | **SB-type** | `beq` |
+| **UJ-type** | `jal` |
+| **I-type (jump)** | `jalr` |
+
+`jal`/`jalr` enable real function calls and returns — see `assembler/jump_test.s` for a program that calls a subroutine twice and returns via the link register.
 
 ### Systolic Array NPU
 
-The NPU is a memory-mapped AI accelerator integrated into the CPU's memory stage. At its core is a **4×4 grid of MAC (Multiply-Accumulate) units**. 
+The NPU is a memory-mapped AI accelerator integrated into the CPU's memory stage. At its core is a **4×4 grid of MAC (Multiply-Accumulate) units** — the grid is generated from a single `ARRAY_SIZE` parameter (2x2 and 8x8 instances are built and verified by `make test_param`). MAC inputs are **signed int8**, matching real quantized NN inference. 
 
 * **Memory-Mapped Interface**: Addresses `256–305` route to the NPU instead of Data Memory.
   * `256–271`: Matrix A storage
@@ -61,7 +66,7 @@ The NPU is a memory-mapped AI accelerator integrated into the CPU's memory stage
 ```
 ├── rtl/
 │   ├── common/          # Shared modules (ALU, RegFile, Control, memories, muxes)
-│   ├── single_cycle/    # Single-cycle top module (placeholder — to be restored)
+│   ├── single_cycle/    # Single-cycle top module (no pipelining — simplest datapath)
 │   ├── pipeline/        # Pipeline registers, forwarding unit, hazard detection, top module
 │   └── npu/             # Systolic array NPU (MAC unit, 4x4 array, controller)
 ├── tb/                  # Testbenches (includes pipeline and NPU integration)
@@ -79,6 +84,7 @@ The NPU is a memory-mapped AI accelerator integrated into the CPU's memory stage
 
 | File | Description |
 |------|-------------|
+| `rtl/single_cycle/single_cycle_top.v` | Top-level single-cycle processor (`make test_single`) |
 | `rtl/pipeline/pipeline_top.v` | Top-level pipelined processor |
 | `rtl/pipeline/forwarding_unit.v` | Data hazard forwarding logic |
 | `rtl/pipeline/hazard_detection_unit.v` | Load-use stall detection |
@@ -150,32 +156,62 @@ You will see the Host program boot the SoC, inject the payload, and wait for the
 
 ### 4. Running the NPU Benchmark (`benchmark.cpp`)
 
-I also built a direct performance comparison testbench (`sim/benchmark.cpp`) that bypasses the CPU and evaluates the NPU speedup for a 4x4 matrix multiplication. The C++ wrapper precisely tracks RTL hardware clock edges for the NPU execution and mathematically breaks down the CPU pipeline stalls/hazards.
+`sim/benchmark.cpp` compares a 4x4 matrix multiply done in software on the pipelined CPU against the same multiply offloaded to the NPU — with **both paths measured from actual RTL execution**, cycle by cycle.
 
 ```bash
 # Compile and run the benchmark simulation
 make bench
 ```
 
+**Methodology.** Two real assembly programs (`assembler/matmul_cpu_test.s` and `assembler/matmul_npu_test.s`, assembled with the Python assembler) run on the same pipelined CPU RTL under Verilator:
+
+* **CPU path**: a software triple loop. Since this ISA has no `mul` instruction, each `A[i][k] * B[k][j]` product is computed by repeated addition — that is what a matrix multiply honestly costs on this core.
+* **NPU path**: copies A and B from data memory into the NPU register bank with real `sw` instructions, writes the start register, polls the status register with `lw`/`beq` until done, and copies the results back. The measured window includes all of that MMIO transfer overhead — no testbench shortcuts or hierarchical register pokes.
+
+Both programs start from the same state (matrices in data memory) and end in the same state (result in data memory). Each brackets its work with a store to the host MMIO port (address 512); the C++ harness counts clock cycles between the two markers, then captures the 16 result values the program streams out and checks them against a golden software model.
+
 **Expected Output:**
 ```text
 ===========================================
         NPU vs CPU BENCHMARK RESULTS       
 ===========================================
-[SUCCESS] Math verified correctly!
+[SUCCESS] Both results match the golden model.
 
-Performance Comparison:
+Matrix C (from RTL):
+   16     8    12    10 
+   40    20    28    34 
+   64    32    44    58 
+   88    44    60    82 
+
+Measured RTL clock cycles (4x4 matmul, data in DMEM to result in DMEM):
 -------------------------------------------
- Metric                  | CPU      | NPU   
+ Path                    | Cycles          
 -------------------------------------------
- Wall-clock time (us)    |    0.211 | N/A
- Total Clock Cycles      |      456 | 59
+ CPU (software loops)    |     1784
+ NPU (MMIO offload)      |      453
 -------------------------------------------
- NPU Speedup             | 7.73x
+ NPU Speedup             | 3.94x
 ===========================================
 ```
 
-### 5. Python Assembler
+Note that the NPU's raw compute is only 10 cycles (`3N-2` for N=4); the 453-cycle offload time is dominated by moving 32 operands and 16 results across the one-word-per-instruction memory-mapped interface. That data-movement bottleneck is itself a realistic result — it is why real accelerators use DMA engines and wide buses rather than programmed I/O.
+
+### 5. Running the Test Suite
+
+All testbenches are self-checking (golden-model comparisons, PASS/FAIL per element) and run under Verilator `--binary --timing` with warnings treated as errors:
+
+```bash
+make test           # run everything below
+make test_single    # single-cycle core (same program as the pipeline TB)
+make test_param     # NPU at 2x2/4x4/8x8, signed int8, plus 30 randomized matrix pairs
+make test_npu       # CPU-driven NPU matmul via assembler-generated program
+make test_cpu_e2e   # pipeline hazard torture test from cpu_test.s
+make test_npu_e2e   # NPU MMIO flow from npu_test.s
+make test_jump      # jal/jalr function calls on BOTH cores side by side
+make lint           # strict lint over all RTL (no waivers)
+```
+
+### 6. Python Assembler
 
 This repository includes a custom, modular RV32I assembler written in Python that can convert `.s` assembly files into a `.hex` file to be loaded into the Verilog instruction memory using `$readmemh()`.
 
@@ -185,7 +221,7 @@ python assembler/assembler.py assembler/test.s output.hex
 ```
 
 The assembler handles:
-* **Standard instructions**: `add, sub, and, or, addi, lw, sw, beq`
+* **Standard instructions**: `add, sub, and, or, addi, lw, sw, beq, jal, jalr`
 * **Pseudoinstructions**: `nop`
 * **Label resolution**: Forward and backward branches (e.g. `loop:`, `beq x1, x2, loop`)
 * **Standard registers and ABIs**: `x0-x31`, `zero`, `sp`, `a0`, `t0`, etc.
@@ -199,7 +235,11 @@ The assembler handles:
 - [x] Systolic array NPU (memory-mapped)
 - [x] Python assembler
 - [x] Host/SoC MMIO integration via C++ testbench
-- [ ] Extended ISA support (shifts, comparisons, jumps)
+- [x] Jumps (`jal`/`jalr` — function calls and returns)
+- [x] Parameterized systolic array (ARRAY_SIZE) with signed int8 MACs
+- [x] Randomized self-checking NPU verification (golden-model reference)
+- [x] Lint-clean build (`verilator --lint-only`, warnings fatal)
+- [ ] Extended ISA support (shifts, comparisons)
 - [x] Full neural network evaluation workload (benchmarked)
 
 ## Tools

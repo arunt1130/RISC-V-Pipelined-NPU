@@ -1,191 +1,188 @@
+// ══════════════════════════════════════════════════════════════
+// NPU vs CPU Benchmark — measured entirely from RTL execution.
+//
+// Two real assembly programs (assembled with the Python assembler)
+// are each run through the actual pipelined CPU RTL:
+//
+//   assembler/matmul_cpu_test.hex — 4x4 matmul in pure software.
+//     The ISA has no multiply instruction, so each product is
+//     computed by repeated addition.
+//
+//   assembler/matmul_npu_test.hex — the same matmul offloaded to
+//     the systolic array NPU using real memory-mapped sw/lw
+//     instructions: copy A/B in, write the start register, poll
+//     the status register, copy C back. No hierarchical pokes.
+//
+// Both programs bracket their work with stores to the host MMIO
+// port (address 512). The harness counts clock cycles between the
+// first marker (start) and second marker (end), then captures the
+// 16 result values the program streams out and checks them against
+// a golden C++ model. The speedup is the ratio of the two measured
+// windows.
+//
+// Usage: Vbenchmark <cpu_program.hex> <npu_program.hex>
+// ══════════════════════════════════════════════════════════════
 #include <iostream>
 #include <iomanip>
-#include <chrono>
+#include <string>
+#include <vector>
 #include <verilated.h>
 #include "Vtop.h"
-#include "Vtop___024root.h"
+
+struct RunResult {
+    uint64_t total_cycles   = 0;   // reset -> last verification value
+    uint64_t compute_cycles = 0;   // between the two marker stores
+    std::vector<uint32_t> c_values;
+    bool ok = false;
+};
+
+// Run one program on the RTL and extract the measurement protocol:
+// TX event 1 = start marker, TX event 2 = end marker,
+// TX events 3..18 = the 16 elements of C.
+static RunResult run_program(const std::string& hexfile) {
+    RunResult res;
+
+    // Each run gets its own Verilated context so each program's
+    // +firmware plusarg is seen only by its own model.
+    VerilatedContext* ctx = new VerilatedContext;
+    std::string plusarg = "+firmware=" + hexfile;
+    const char* args[] = { plusarg.c_str() };
+    ctx->commandArgsAdd(1, args);
+
+    Vtop* top = new Vtop{ctx};
+
+    // Reset
+    top->clk = 0;
+    top->reset = 1;
+    top->host_rx_data = 0;
+    top->eval();
+    for (int i = 0; i < 4; i++) {
+        top->clk = 1; top->eval();
+        top->clk = 0; top->eval();
+    }
+    top->reset = 0;
+    top->eval();
+
+    const uint64_t TIMEOUT = 200000;
+    uint64_t cycle = 0;
+    uint64_t start_cycle = 0, end_cycle = 0;
+    int tx_events = 0;
+
+    while (cycle < TIMEOUT) {
+        top->clk = 1; top->eval();
+        top->clk = 0; top->eval();
+        cycle++;
+
+        if (top->host_tx_valid) {
+            tx_events++;
+            if (tx_events == 1) {
+                start_cycle = cycle;            // start marker
+            } else if (tx_events == 2) {
+                end_cycle = cycle;              // end marker
+            } else {
+                res.c_values.push_back(top->host_tx_data);
+                if (res.c_values.size() == 16) {
+                    res.total_cycles   = cycle;
+                    res.compute_cycles = end_cycle - start_cycle;
+                    res.ok = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!res.ok) {
+        std::cout << "[ERROR] " << hexfile << ": timeout after " << cycle
+                  << " cycles (" << tx_events << " TX events seen)\n";
+    }
+
+    top->final();
+    delete top;
+    delete ctx;
+    return res;
+}
 
 int main(int argc, char** argv) {
-    Verilated::commandArgs(argc, argv);
-    Vtop* top = new Vtop;
+    if (argc < 3) {
+        std::cout << "Usage: " << argv[0]
+                  << " <cpu_program.hex> <npu_program.hex>\n";
+        return 1;
+    }
 
-    // Hardcoded 4x4 matrices A and B
-    int8_t A[4][4] = {
-        {1,  2,  3,  4},
-        {5,  6,  7,  8},
-        {9, 10, 11, 12},
+    // Golden reference — must match the matrices initialized by
+    // both assembly programs.
+    const int A[4][4] = {
+        { 1,  2,  3,  4},
+        { 5,  6,  7,  8},
+        { 9, 10, 11, 12},
         {13, 14, 15, 16}
     };
-    
-    int8_t B[4][4] = {
+    const int B[4][4] = {
         {2, 0, 1, 3},
         {1, 1, 0, 2},
         {0, 2, 1, 1},
         {3, 0, 2, 0}
     };
-
-    int32_t C_cpu[4][4] = {0};
-    int32_t C_npu[4][4] = {0};
-
-    // -------------------------------------------------------------------
-    // CPU PATH (C++ simulation with precise pipeline analysis)
-    // -------------------------------------------------------------------
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
-    uint64_t cpu_instruction_cycles = 0;
-    
-    // CPU Pipeline Cycle Breakdown:
-    // For a 4x4 matrix multiply, we have nested loops.
-    // Base cycle = 1 per instruction.
-    for (int i = 0; i < 4; i++) {
+    int golden[4][4];
+    for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++) {
-            int32_t sum = 0;
-            
-            // Inner loop (k from 0 to 3)
-            for (int k = 0; k < 4; k++) {
-                sum += A[i][k] * B[k][j];
-                
-                // Assembly equivalent per MAC:
-                // lw t0, 0(a0)     -> 1 base cycle
-                // lw t1, 0(a1)     -> 1 base cycle
-                // mul t2, t0, t1   -> 1 base cycle + 1 load-use stall (t1 used immediately)
-                // add t3, t3, t2   -> 1 base cycle + 0 stall (t2 forwarded from EX/MEM)
-                cpu_instruction_cycles += (1 + 1 + 2 + 1); 
-            }
-            C_cpu[i][j] = sum;
-            
-            // Inner Loop Maintenance overhead:
-            // addi a0, a0, 4   -> 1 base
-            // addi a1, a1, 4   -> 1 base
-            // addi t4, t4, -1  -> 1 base
-            // bne t4, zero, L1 -> 1 base + 3 cycle penalty (assume branch taken flush)
-            cpu_instruction_cycles += (1 + 1 + 1 + 4);
+            int sum = 0;
+            for (int k = 0; k < 4; k++) sum += A[i][k] * B[k][j];
+            golden[i][j] = sum;
         }
-        // Outer loop maintenance overhead:
-        // Reset pointers, advance row pointer, branch back
-        cpu_instruction_cycles += 6; 
-    }
-    
-    auto end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::micro> elapsed = end_time - start_time;
 
-    // -------------------------------------------------------------------
-    // NPU PATH (Verilog simulation with real RTL clock ticks)
-    // -------------------------------------------------------------------
-    
-    // Initialize
-    top->clk = 0;
-    top->reset = 1;
-    top->eval();
-    top->clk = 1;
-    top->eval();
-    top->clk = 0;
-    top->reset = 0;
-    top->eval();
+    std::cout << "[Bench] Running software matmul on the pipelined CPU RTL...\n";
+    RunResult cpu = run_program(argv[1]);
+    std::cout << "[Bench] Running NPU-offloaded matmul on the same RTL...\n";
+    RunResult npu = run_program(argv[2]);
 
-    uint64_t npu_cycles = 0;
+    if (!cpu.ok || !npu.ok) return 1;
 
-    // 1. Write A and B (Simulated MMIO overhead)
-    // Writing 16 elements to A and 16 to B takes 32 CPU store instructions
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            // ASSUMPTION FLAG: Directly poking the NPU registers because 
-            // pipeline_top.v does not expose an external host MMIO bus.
-            top->rootp->top__DOT__npu__DOT__A_reg[i*4 + j] = A[i][j];
-            top->rootp->top__DOT__npu__DOT__B_reg[i*4 + j] = B[i][j];
-            
-            // Simulate 1 clock cycle per MMIO write
-            top->clk = 1; top->eval();
-            top->clk = 0; top->eval();
-            npu_cycles += 2; // Write A and Write B
-        }
-    }
-
-    // 2. Pulse start register (address 304 / offset 48)
-    // ASSUMPTION FLAG: Simulating the pulse by driving the internal FSM state 
-    // since the 'start_pulse' wire requires combinational alignment with MEM stage.
-    top->rootp->top__DOT__npu__DOT__state = 1; // CLEAR state triggers computation
-    top->clk = 1; top->eval();
-    top->clk = 0; top->eval();
-    npu_cycles++;
-
-    // 3. Poll status register (address 305 / offset 49) until bit 0 (done) is high
-    // State 3 corresponds to DONE in the RTL FSM. We tick the real Verilator clock!
-    while (top->rootp->top__DOT__npu__DOT__state != 3 && npu_cycles < 1000) {
-        top->clk = 1; top->eval();
-        top->clk = 0; top->eval();
-        npu_cycles++;
-    }
-
-    // 4. Read C (Simulated MMIO read overhead)
-    // In Verilator, we bypass the address wire and directly access the PE accumulators
-    uint32_t* acc_ptrs[16] = {
-        &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_0_0, &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_0_1,
-        &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_0_2, &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_0_3,
-        &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_1_0, &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_1_1,
-        &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_1_2, &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_1_3,
-        &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_2_0, &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_2_1,
-        &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_2_2, &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_2_3,
-        &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_3_0, &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_3_1,
-        &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_3_2, &top->rootp->top__DOT__npu__DOT__sa__DOT__acc_3_3
-    };
-
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            C_npu[i][j] = *(acc_ptrs[i*4 + j]);
-            
-            // Simulate 1 clock cycle per MMIO read
-            top->clk = 1; top->eval();
-            top->clk = 0; top->eval();
-            npu_cycles++;
-        }
-    }
-
-    // -------------------------------------------------------------------
-    // VALIDATION & OUTPUT
-    // -------------------------------------------------------------------
-    
-    bool match = true;
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (C_cpu[i][j] != C_npu[i][j]) {
+    // Verify both result streams against the golden model
+    auto verify = [&](const RunResult& r, const char* name) {
+        bool match = true;
+        for (int i = 0; i < 16; i++) {
+            if ((int)r.c_values[i] != golden[i / 4][i % 4]) {
+                std::cout << "[ERROR] " << name << " C[" << i / 4 << "]["
+                          << i % 4 << "] expected " << golden[i / 4][i % 4]
+                          << ", got " << r.c_values[i] << "\n";
                 match = false;
             }
         }
-    }
+        return match;
+    };
+    bool cpu_match = verify(cpu, "CPU");
+    bool npu_match = verify(npu, "NPU");
 
-    std::cout << "===========================================\n";
+    std::cout << "\n===========================================\n";
     std::cout << "        NPU vs CPU BENCHMARK RESULTS       \n";
     std::cout << "===========================================\n";
-    
-    if (match) {
-        std::cout << "[SUCCESS] Math verified correctly!\n\n";
+
+    if (cpu_match && npu_match) {
+        std::cout << "[SUCCESS] Both results match the golden model.\n\n";
     } else {
-        std::cout << "[ERROR] Mismatch detected!\n\n";
+        std::cout << "[ERROR] Result mismatch detected!\n\n";
     }
 
-    std::cout << "Matrix C (Result):\n";
+    std::cout << "Matrix C (from RTL):\n";
     for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            std::cout << std::setw(5) << C_npu[i][j] << " ";
-        }
+        for (int j = 0; j < 4; j++)
+            std::cout << std::setw(5) << npu.c_values[i * 4 + j] << " ";
         std::cout << "\n";
     }
-    std::cout << "\n";
 
-    std::cout << "Performance Comparison:\n";
+    std::cout << "\nMeasured RTL clock cycles (4x4 matmul, data in DMEM to result in DMEM):\n";
     std::cout << "-------------------------------------------\n";
-    std::cout << " Metric                  | CPU      | NPU   \n";
+    std::cout << " Path                    | Cycles          \n";
     std::cout << "-------------------------------------------\n";
-    std::cout << " Wall-clock time (us)    | " << std::setw(8) << elapsed.count() << " | N/A\n";
-    std::cout << " Total Clock Cycles      | " << std::setw(8) << cpu_instruction_cycles << " | " << npu_cycles << "\n";
+    std::cout << " CPU (software loops)    | " << std::setw(8) << cpu.compute_cycles << "\n";
+    std::cout << " NPU (MMIO offload)      | " << std::setw(8) << npu.compute_cycles << "\n";
     std::cout << "-------------------------------------------\n";
-    
-    double speedup = (double)cpu_instruction_cycles / (double)npu_cycles;
-    std::cout << " NPU Speedup             | " << std::fixed << std::setprecision(2) << speedup << "x\n";
+
+    double speedup = (double)cpu.compute_cycles / (double)npu.compute_cycles;
+    std::cout << " NPU Speedup             | " << std::fixed
+              << std::setprecision(2) << speedup << "x\n";
     std::cout << "===========================================\n";
 
-    top->final();
-    delete top;
-    return 0;
+    return (cpu_match && npu_match) ? 0 : 1;
 }

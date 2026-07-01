@@ -24,8 +24,8 @@ def encode_r_type(instr, args):
 
 def encode_i_type(instr, args):
     """Encode I-type: imm[11:0] | rs1 | funct3 | rd | opcode"""
-    # Note: args could be [rd, rs1, imm] (addi) OR [rd, imm, rs1] (lw)
-    if instr == 'lw':
+    # Note: args could be [rd, rs1, imm] (addi) OR [rd, imm, rs1] (lw/jalr)
+    if instr in ('lw', 'jalr'):
         rd = get_reg_num(args[0])
         imm = int(args[1])
         rs1 = get_reg_num(args[2])
@@ -86,6 +86,35 @@ def encode_sb_type(instr, args, current_pc, labels):
     binary = imm_12 + imm_10_5 + int_to_bin(rs2, 5) + int_to_bin(rs1, 5) + funct3 + imm_4_1 + imm_11 + opcode
     return int(binary, 2)
 
+def encode_uj_type(instr, args, current_pc, labels):
+    """Encode UJ-type: imm[20] | imm[10:1] | imm[11] | imm[19:12] | rd | opcode"""
+    # args: [rd, label_or_offset]
+    rd = get_reg_num(args[0])
+    target = args[1]
+
+    # Resolve label or direct offset
+    if target in labels:
+        offset = labels[target] - current_pc
+    else:
+        offset = int(target)
+
+    if offset % 2 != 0:
+        raise ValueError(f"Jump offset must be a multiple of 2 (got {offset})")
+    if offset < -(1 << 20) or offset >= (1 << 20):
+        raise ValueError(f"Jump offset out of range (got {offset})")
+
+    opcode = int_to_bin(INSTRUCTIONS[instr]['opcode'], 7)
+
+    imm_bin = int_to_bin(offset, 21)  # bits 20 down to 0
+    # imm_bin is a string, index 0 is MSB (bit 20)
+    imm_20    = imm_bin[0]
+    imm_19_12 = imm_bin[1:9]
+    imm_11    = imm_bin[9]
+    imm_10_1  = imm_bin[10:20]
+
+    binary = imm_20 + imm_10_1 + imm_11 + imm_19_12 + int_to_bin(rd, 5) + opcode
+    return int(binary, 2)
+
 def encode_instruction(instr_dict, labels):
     """Takes a parsed instruction dict and routes to the correct encoder."""
     name = instr_dict['name']
@@ -105,5 +134,7 @@ def encode_instruction(instr_dict, labels):
         return encode_s_type(name, args)
     elif fmt == 'SB':
         return encode_sb_type(name, args, pc, labels)
+    elif fmt == 'UJ':
+        return encode_uj_type(name, args, pc, labels)
     else:
         raise NotImplementedError(f"Format {fmt} not implemented")

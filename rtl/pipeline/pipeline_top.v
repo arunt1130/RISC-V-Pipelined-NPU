@@ -48,6 +48,7 @@ wire [4:0]  RS1_ID, RS2_ID, RD_ID;
 // Control signals produced in Decode
 wire        ALUSrc_ID, MemtoReg_ID, RegWrite_ID;
 wire        MemRead_ID, MemWrite_ID, Branch_ID;
+wire        Jump_ID, JALR_ID;      // jal/jalr control
 wire [1:0]  ALUOp_ID;
 
 // ────────────────── EX stage wires ──────────────────
@@ -58,6 +59,7 @@ wire [2:0]  fun3_EX;
 wire [4:0]  RS1_EX, RS2_EX, RD_EX;
 wire        ALUSrc_EX, MemtoReg_EX, RegWrite_EX;
 wire        MemRead_EX, MemWrite_EX, Branch_EX;
+wire        Jump_EX, JALR_EX;
 wire [1:0]  ALUOp_EX;
 // Forwarding mux outputs (Step 5)
 wire [31:0] ForwardA_data_EX;  // forwarded value for ALU input A
@@ -75,6 +77,7 @@ wire [31:0] BranchTarget_EX;   // PC_EX + ImmExt_EX
 // From EX/MEM register outputs
 wire        MemtoReg_MEM, RegWrite_MEM;
 wire        MemRead_MEM, MemWrite_MEM, Branch_MEM;
+wire        Jump_MEM;
 wire        zero_MEM;
 wire [31:0] ALU_result_MEM, RD2_MEM, BranchTarget_MEM;
 wire [4:0]  RD_MEM;
@@ -100,9 +103,6 @@ assign      host_tx_valid = MemWrite_MEM & host_select;
 
 wire [31:0] dmem_data_out;     // data memory read output
 wire [31:0] npu_data_out;      // NPU read output
-
-always @(posedge clk) begin
-end
 
 // ────────────────── WB stage wires ──────────────────
 // From MEM/WB register outputs
@@ -208,7 +208,9 @@ Control_Unit Control_Unit(
     .ALUOp(ALUOp_ID),
     .MemWrite(MemWrite_ID),
     .ALUSrc(ALUSrc_ID),
-    .RegWrite(RegWrite_ID)
+    .RegWrite(RegWrite_ID),
+    .Jump(Jump_ID),
+    .JALR(JALR_ID)
 );
 
 // Step 6: Hazard Detection Unit — sits in Decode, looks at Execute
@@ -223,9 +225,6 @@ Hazard_Detection_Unit HDU(
 
 wire actual_stall = stall_hazard & ~PCSrc_MEM;
 
-always @(posedge clk) begin
-end
-
 
 // ╔══════════════════════════════════════════════════╗
 // ║              ID/EX Pipeline Register              ║
@@ -236,6 +235,7 @@ ID_EX_Reg IDEX(
     // Control in
     .ALUSrc_in(ALUSrc_ID),  .MemtoReg_in(MemtoReg_ID), .RegWrite_in(RegWrite_ID),
     .MemRead_in(MemRead_ID), .MemWrite_in(MemWrite_ID), .Branch_in(Branch_ID),
+    .Jump_in(Jump_ID), .JALR_in(JALR_ID),
     .ALUOp_in(ALUOp_ID),
     // Data in
     .PC_in(PC_ID), .RD1_in(RD1_ID), .RD2_in(RD2_ID), .ImmExt_in(ImmExt_ID),
@@ -246,6 +246,7 @@ ID_EX_Reg IDEX(
     // Control out
     .ALUSrc_out(ALUSrc_EX), .MemtoReg_out(MemtoReg_EX), .RegWrite_out(RegWrite_EX),
     .MemRead_out(MemRead_EX), .MemWrite_out(MemWrite_EX), .Branch_out(Branch_EX),
+    .Jump_out(Jump_EX), .JALR_out(JALR_EX),
     .ALUOp_out(ALUOp_EX),
     // Data out
     .PC_out(PC_EX), .RD1_out(RD1_EX), .RD2_out(RD2_EX), .ImmExt_out(ImmExt_EX),
@@ -327,6 +328,21 @@ Adder BranchAdder(
     .Sum_out(BranchTarget_EX)
 );
 
+// ── Jump support (jal / jalr) ──
+// Link value: PC of this instruction + 4, written to rd.
+wire [31:0] link_EX = PC_EX + 32'd4;
+
+// For jumps, the value carried down the ALU-result path is the
+// link (PC+4) — that is what gets written back to rd, and what
+// the forwarding unit hands to any dependent instruction.
+wire [31:0] EXMEM_result_in = Jump_EX ? link_EX : ALU_result_EX;
+
+// Redirect target: jal jumps to PC+imm (the branch adder output);
+// jalr jumps to rs1+imm (the ALU result) with bit 0 cleared per
+// the RISC-V spec.
+wire [31:0] EXMEM_target_in = JALR_EX ? (ALU_result_EX & 32'hFFFFFFFE)
+                                      : BranchTarget_EX;
+
 
 // ╔══════════════════════════════════════════════════╗
 // ║             EX/MEM Pipeline Register              ║
@@ -337,15 +353,17 @@ EX_MEM_Reg EXMEM(
     // Control in
     .MemtoReg_in(MemtoReg_EX), .RegWrite_in(RegWrite_EX),
     .MemRead_in(MemRead_EX), .MemWrite_in(MemWrite_EX), .Branch_in(Branch_EX),
+    .Jump_in(Jump_EX),
     // Data in
     .zero_in(zero_EX),
-    .ALU_result_in(ALU_result_EX),
+    .ALU_result_in(EXMEM_result_in),  // link (PC+4) for jumps, ALU result otherwise
     .RD2_in(ForwardB_data_EX),    // ← forwarded value for store data (was RD2_EX)
-    .BranchTarget_in(BranchTarget_EX),
+    .BranchTarget_in(EXMEM_target_in),
     .RD_in(RD_EX),
     // Control out
     .MemtoReg_out(MemtoReg_MEM), .RegWrite_out(RegWrite_MEM),
     .MemRead_out(MemRead_MEM), .MemWrite_out(MemWrite_MEM), .Branch_out(Branch_MEM),
+    .Jump_out(Jump_MEM),
     // Data out
     .zero_out(zero_MEM),
     .ALU_result_out(ALU_result_MEM), .RD2_out(RD2_MEM), .BranchTarget_out(BranchTarget_MEM),
@@ -381,12 +399,14 @@ NPU_Top npu(
 // Mux read data: Host, NPU, or Data Memory based on address
 assign MemData_MEM = host_select ? host_rx_data : (npu_select ? npu_data_out : dmem_data_out);
 
-// Branch decision: Branch AND zero → PCSrc
+// Branch decision: (Branch AND zero) OR Jump → PCSrc
+wire BranchTaken_MEM;
 AND_logic AND_branch(
     .branch(Branch_MEM),
     .zero(zero_MEM),
-    .and_out(PCSrc_MEM)
+    .and_out(BranchTaken_MEM)
 );
+assign PCSrc_MEM = BranchTaken_MEM | Jump_MEM;
 
 // PC source mux: PC+4 or branch target
 Mux2 PC_mux(

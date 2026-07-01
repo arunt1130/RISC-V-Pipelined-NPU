@@ -13,6 +13,7 @@ module ID_EX_Reg(
     // Control signals
     input        ALUSrc_in, MemtoReg_in, RegWrite_in,
     input        MemRead_in, MemWrite_in, Branch_in,
+    input        Jump_in, JALR_in,
     input [1:0]  ALUOp_in,
     // Data
     input [31:0] PC_in, RD1_in, RD2_in, ImmExt_in,
@@ -26,6 +27,7 @@ module ID_EX_Reg(
     // Control signals out
     output reg        ALUSrc_out, MemtoReg_out, RegWrite_out,
     output reg        MemRead_out, MemWrite_out, Branch_out,
+    output reg        Jump_out, JALR_out,
     output reg [1:0]  ALUOp_out,
     // Data out
     output reg [31:0] PC_out, RD1_out, RD2_out, ImmExt_out,
@@ -45,6 +47,8 @@ module ID_EX_Reg(
             MemRead_out  <= 1'b0;
             MemWrite_out <= 1'b0;
             Branch_out   <= 1'b0;
+            Jump_out     <= 1'b0;
+            JALR_out     <= 1'b0;
             ALUOp_out    <= 2'b0;
             // Zero all data
             PC_out       <= 32'b0;
@@ -64,6 +68,8 @@ module ID_EX_Reg(
             MemRead_out  <= MemRead_in;
             MemWrite_out <= MemWrite_in;
             Branch_out   <= Branch_in;
+            Jump_out     <= Jump_in;
+            JALR_out     <= JALR_in;
             ALUOp_out    <= ALUOp_in;
             PC_out       <= PC_in;
             RD1_out      <= RD1_in;

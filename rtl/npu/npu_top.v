@@ -4,22 +4,30 @@
 // Contains:
 //   1. Register Bank — stores matrices A, B and exposes results C
 //   2. Controller FSM — manages computation lifecycle
-//   3. Systolic Array instance — the 4×4 MAC grid
+//   3. Systolic Array instance — the ARRAY_SIZE x ARRAY_SIZE MAC grid
 //
-// Memory Map (offsets from NPU base, i.e. address[7:0]):
-//   0–15:  Matrix A (16 × 8-bit elements, written as 32-bit words)
-//   16–31: Matrix B (16 × 8-bit elements, written as 32-bit words)
-//   32–47: Matrix C (16 × 32-bit results, READ-ONLY)
-//   48:    Control register (write 1 to start computation)
-//   49:    Status register  (read: bit 0 = done)
+// Memory Map (offsets from NPU base, i.e. address[7:0]).
+// MAT = ARRAY_SIZE*ARRAY_SIZE. For the default ARRAY_SIZE=4:
+//   [0,     MAT)   Matrix A elements          (  0–15)
+//   [MAT,  2*MAT)  Matrix B elements          ( 16–31)
+//   [2*MAT,3*MAT)  Matrix C results, READ-ONLY( 32–47)
+//   3*MAT          Control register (write 1 to start)   (48)
+//   3*MAT+1        Status register  (read: bit 0 = done) (49)
+//
+// The 8-bit offset space limits ARRAY_SIZE to 9 (3*81+1 = 244).
+// Practical power-of-two sizes: 2, 4, 8.
 //
 // CPU usage:
 //   1. Write A and B elements via sw instructions
-//   2. Write 1 to control register (offset 48) to start
-//   3. Poll status register (offset 49) until done=1
-//   4. Read results from offsets 32–47
+//   2. Write 1 to the control register to start
+//   3. Poll the status register until done=1
+//   4. Read results from the Matrix C region
 // ══════════════════════════════════════════════════════════════
-module NPU_Top(
+module NPU_Top #(
+    parameter ARRAY_SIZE = 4,
+    parameter DATA_WIDTH = 8,
+    parameter ACC_WIDTH  = 32
+)(
     input         clk, reset,
     // CPU memory-mapped interface (active in MEM stage)
     input         mem_write,
@@ -29,13 +37,24 @@ module NPU_Top(
     output reg [31:0] read_data
 );
 
+// ── Derived memory map ──
+localparam MAT = ARRAY_SIZE * ARRAY_SIZE;
+localparam [7:0] B_BASE      = MAT;
+localparam [7:0] C_BASE      = 2 * MAT;
+localparam [7:0] CTRL_ADDR   = 3 * MAT;
+localparam [7:0] STATUS_ADDR = 3 * MAT + 1;
+
+// A full multiply takes 3*ARRAY_SIZE - 2 feed cycles (0-indexed:
+// the last feed cycle is 3*ARRAY_SIZE - 3).
+localparam [7:0] LAST_CYCLE = 3 * ARRAY_SIZE - 3;
+
 // ╔══════════════════════════════════════════════════╗
 // ║              REGISTER BANK                        ║
 // ╚══════════════════════════════════════════════════╝
 
-// Matrix A and B storage — 8-bit elements, 16 each
-reg [7:0] A_reg [0:15];  // A[i*4+j] = A[i][j]
-reg [7:0] B_reg [0:15];  // B[i*4+j] = B[i][j]
+// Matrix A and B storage — DATA_WIDTH-bit elements, MAT each
+reg [DATA_WIDTH-1:0] A_reg [0:MAT-1];  // A[i*ARRAY_SIZE+j] = A[i][j]
+reg [DATA_WIDTH-1:0] B_reg [0:MAT-1];  // B[i*ARRAY_SIZE+j] = B[i][j]
 integer k;
 
 // ╔══════════════════════════════════════════════════╗
@@ -45,14 +64,14 @@ integer k;
 // States
 localparam IDLE    = 2'b00;  // waiting for start
 localparam CLEAR   = 2'b01;  // zeroing accumulators
-localparam COMPUTE = 2'b10;  // feeding skewed data (7 cycles)
+localparam COMPUTE = 2'b10;  // feeding skewed data
 localparam DONE    = 2'b11;  // results ready
 
 reg [1:0] state;
-reg [3:0] cycle_count;  // 0–9 for 10 compute cycles
+reg [7:0] cycle_count;  // 0 .. LAST_CYCLE during COMPUTE
 
 // Start pulse — fires the cycle the CPU writes 1 to the control register
-wire start_pulse = mem_write && (address == 8'd48) && write_data[0];
+wire start_pulse = mem_write && (address == CTRL_ADDR) && write_data[0];
 
 // Control outputs to the systolic array
 wire sa_enable = (state == COMPUTE);
@@ -63,7 +82,7 @@ wire done      = (state == DONE);
 always @(posedge clk or posedge reset) begin
     if (reset) begin
         state       <= IDLE;
-        cycle_count <= 3'b0;
+        cycle_count <= 8'b0;
     end
     else begin
         case (state)
@@ -74,15 +93,15 @@ always @(posedge clk or posedge reset) begin
             CLEAR: begin
                 // One cycle to zero all accumulators
                 state       <= COMPUTE;
-                cycle_count <= 4'b0;
+                cycle_count <= 8'b0;
             end
             COMPUTE: begin
-                if (cycle_count == 4'd9) begin
-                    // All 10 cycles complete (0–9)
+                if (cycle_count == LAST_CYCLE) begin
+                    // All feed cycles complete
                     state <= DONE;
                 end
                 else begin
-                    cycle_count <= cycle_count + 1;
+                    cycle_count <= cycle_count + 8'd1;
                 end
             end
             DONE: begin
@@ -102,64 +121,37 @@ end
 // A[i][k] and B[k][j] arrive at PE(i,j) at the same time.
 //
 // Left inputs (rows of A, skewed by row index):
-//   Row i feeds A[i][cycle_count - i] when (cycle_count >= i)
-//   and (cycle_count - i <= 3), else feeds 0.
+//   Row i feeds A[i][cycle_count - i] while
+//   i <= cycle_count <= i + ARRAY_SIZE - 1, else 0.
 //
 // Top inputs (columns of B, skewed by column index):
-//   Col j feeds B[cycle_count - j][j] when (cycle_count >= j)
-//   and (cycle_count - j <= 3), else feeds 0.
+//   Col j feeds B[cycle_count - j][j] over the same window.
+//
+// Row skew and column skew have identical structure, so one
+// loop drives both lane buses.
 
-reg [7:0] left_in_0, left_in_1, left_in_2, left_in_3;
-reg [7:0] top_in_0,  top_in_1,  top_in_2,  top_in_3;
+reg [ARRAY_SIZE*DATA_WIDTH-1:0] left_in_bus;  // lane i = row i of A
+reg [ARRAY_SIZE*DATA_WIDTH-1:0] top_in_bus;   // lane j = col j of B
 
+integer lane;
+integer feed_idx;
+integer cc;  // cycle_count widened for index arithmetic
 always @(*) begin
-    // ── Row 0: skew = 0, feeds at cycles 0–3 ──
-    if (state == COMPUTE && cycle_count <= 3)
-        left_in_0 = A_reg[cycle_count];             // A[0][cycle_count]
-    else
-        left_in_0 = 8'b0;
-
-    // ── Row 1: skew = 1, feeds at cycles 1–4 ──
-    if (state == COMPUTE && cycle_count >= 1 && cycle_count <= 4)
-        left_in_1 = A_reg[4 + (cycle_count - 1)];   // A[1][cycle_count-1]
-    else
-        left_in_1 = 8'b0;
-
-    // ── Row 2: skew = 2, feeds at cycles 2–5 ──
-    if (state == COMPUTE && cycle_count >= 2 && cycle_count <= 5)
-        left_in_2 = A_reg[8 + (cycle_count - 2)];   // A[2][cycle_count-2]
-    else
-        left_in_2 = 8'b0;
-
-    // ── Row 3: skew = 3, feeds at cycles 3–6 ──
-    if (state == COMPUTE && cycle_count >= 3 && cycle_count <= 6)
-        left_in_3 = A_reg[12 + (cycle_count - 3)];  // A[3][cycle_count-3]
-    else
-        left_in_3 = 8'b0;
-
-    // ── Col 0: skew = 0, feeds at cycles 0–3 ──
-    if (state == COMPUTE && cycle_count <= 3)
-        top_in_0 = B_reg[cycle_count * 4];           // B[cycle_count][0]
-    else
-        top_in_0 = 8'b0;
-
-    // ── Col 1: skew = 1, feeds at cycles 1–4 ──
-    if (state == COMPUTE && cycle_count >= 1 && cycle_count <= 4)
-        top_in_1 = B_reg[(cycle_count - 1) * 4 + 1]; // B[cycle_count-1][1]
-    else
-        top_in_1 = 8'b0;
-
-    // ── Col 2: skew = 2, feeds at cycles 2–5 ──
-    if (state == COMPUTE && cycle_count >= 2 && cycle_count <= 5)
-        top_in_2 = B_reg[(cycle_count - 2) * 4 + 2]; // B[cycle_count-2][2]
-    else
-        top_in_2 = 8'b0;
-
-    // ── Col 3: skew = 3, feeds at cycles 3–6 ──
-    if (state == COMPUTE && cycle_count >= 3 && cycle_count <= 6)
-        top_in_3 = B_reg[(cycle_count - 3) * 4 + 3]; // B[cycle_count-3][3]
-    else
-        top_in_3 = 8'b0;
+    left_in_bus = {ARRAY_SIZE*DATA_WIDTH{1'b0}};
+    top_in_bus  = {ARRAY_SIZE*DATA_WIDTH{1'b0}};
+    feed_idx    = 0;
+    cc          = {24'b0, cycle_count};
+    if (state == COMPUTE) begin
+        for (lane = 0; lane < ARRAY_SIZE; lane = lane + 1) begin
+            if (cc >= lane && cc <= lane + ARRAY_SIZE - 1) begin
+                feed_idx = cc - lane;  // element index within the lane
+                left_in_bus[lane*DATA_WIDTH +: DATA_WIDTH] =
+                    A_reg[lane*ARRAY_SIZE + feed_idx];       // A[lane][feed_idx]
+                top_in_bus[lane*DATA_WIDTH +: DATA_WIDTH]  =
+                    B_reg[feed_idx*ARRAY_SIZE + lane];       // B[feed_idx][lane]
+            end
+        end
+    end
 end
 
 
@@ -167,17 +159,27 @@ end
 // ║           SYSTOLIC ARRAY INSTANCE                 ║
 // ╚══════════════════════════════════════════════════╝
 
-// Result read: when CPU reads offset 32–47, select the right PE
-wire [3:0] result_sel = address - 8'd32;
-wire [31:0] array_result;
+// Register-bank index widths — the address decode guarantees the
+// offsets are in range, so the extra address bits can be dropped.
+localparam IDX_W = (MAT > 1) ? $clog2(MAT) : 1;
+wire [7:0]       b_offset = address - B_BASE;
+wire [IDX_W-1:0] a_index  = address[IDX_W-1:0];
+wire [IDX_W-1:0] b_index  = b_offset[IDX_W-1:0];
 
-Systolic_Array_4x4 sa(
+// Result read: when the CPU reads the Matrix C region, select
+// the right PE accumulator.
+wire [7:0] result_sel = address - C_BASE;
+wire [ACC_WIDTH-1:0] array_result;
+
+Systolic_Array #(
+    .ARRAY_SIZE(ARRAY_SIZE),
+    .DATA_WIDTH(DATA_WIDTH),
+    .ACC_WIDTH(ACC_WIDTH)
+) sa (
     .clk(clk), .reset(reset),
     .enable(sa_enable), .clear(sa_clear),
-    .left_in_0(left_in_0), .left_in_1(left_in_1),
-    .left_in_2(left_in_2), .left_in_3(left_in_3),
-    .top_in_0(top_in_0),   .top_in_1(top_in_1),
-    .top_in_2(top_in_2),   .top_in_3(top_in_3),
+    .left_in(left_in_bus),
+    .top_in(top_in_bus),
     .result_sel(result_sel),
     .result_out(array_result)
 );
@@ -189,19 +191,17 @@ Systolic_Array_4x4 sa(
 
 always @(posedge clk or posedge reset) begin
     if (reset) begin
-        for (k = 0; k < 16; k = k + 1) begin
-            A_reg[k] <= 8'b0;
-            B_reg[k] <= 8'b0;
+        for (k = 0; k < MAT; k = k + 1) begin
+            A_reg[k] <= {DATA_WIDTH{1'b0}};
+            B_reg[k] <= {DATA_WIDTH{1'b0}};
         end
     end
     else if (mem_write) begin
-        // Matrix A: offsets 0–15
-        if (address <= 8'd15)
-            A_reg[address] <= write_data[7:0];
-        // Matrix B: offsets 16–31
-        else if (address >= 8'd16 && address <= 8'd31)
-            B_reg[address - 8'd16] <= write_data[7:0];
-        // Control register (offset 48) is handled by start_pulse wire
+        if (address < B_BASE)
+            A_reg[a_index] <= write_data[DATA_WIDTH-1:0];
+        else if (address < C_BASE)
+            B_reg[b_index] <= write_data[DATA_WIDTH-1:0];
+        // Control register is handled by the start_pulse wire
     end
 end
 
@@ -212,16 +212,18 @@ end
 
 always @(*) begin
     if (mem_read) begin
-        if (address <= 8'd15)
-            // Read back Matrix A (zero-extended to 32 bits)
-            read_data = {24'b0, A_reg[address]};
-        else if (address >= 8'd16 && address <= 8'd31)
-            // Read back Matrix B
-            read_data = {24'b0, B_reg[address - 8'd16]};
-        else if (address >= 8'd32 && address <= 8'd47)
-            // Read Matrix C result from systolic array
+        if (address < B_BASE)
+            // Read back Matrix A (sign-extended — elements are signed int8)
+            read_data = {{(32-DATA_WIDTH){A_reg[a_index][DATA_WIDTH-1]}},
+                         A_reg[a_index]};
+        else if (address < C_BASE)
+            // Read back Matrix B (sign-extended)
+            read_data = {{(32-DATA_WIDTH){B_reg[b_index][DATA_WIDTH-1]}},
+                         B_reg[b_index]};
+        else if (address < CTRL_ADDR)
+            // Read Matrix C result from the systolic array
             read_data = array_result;
-        else if (address == 8'd49)
+        else if (address == STATUS_ADDR)
             // Status register: bit 0 = done
             read_data = {31'b0, done};
         else

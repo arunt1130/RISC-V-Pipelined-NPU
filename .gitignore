@@ -1,3 +1,16 @@
+# Verilator build output
+obj_dir/
+/build/
+
+# Python
+__pycache__/
+*.pyc
+
+# Generated assembler output (checked-in program hex files in assembler/
+# are regenerated from their .s sources via `make hex`)
+output.hex
+*.vcd
+
 # Questa / ModelSim
 work/
 transcript
@@ -10,3 +23,6 @@ wlft*
 *.log
 *.bak
 *~
+
+# Local tool settings
+.claude/

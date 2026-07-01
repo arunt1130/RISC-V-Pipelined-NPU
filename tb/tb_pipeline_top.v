@@ -175,7 +175,7 @@ initial begin
     $display("══════════════════════════════════════════════════");
     $display("Results: %0d PASS, %0d FAIL", pass_count, fail_count);
     $display("══════════════════════════════════════════════════");
-    $stop;
+    $finish;
 end
 
 // Self-checking task — prints PASS or FAIL for each test

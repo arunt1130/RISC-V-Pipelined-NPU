@@ -1,17 +1,19 @@
 # Walkthrough: Steps 5–7 — Forwarding, Hazard Detection, Branch Handling
 
+> **Note:** This is a historical development log. The monolithic `Single_cycle.v` it references has since been split into `rtl/common/`, `rtl/pipeline/`, and `rtl/single_cycle/`.
+
 ## Overview of Changes
 
 Three new modules were created and wired into the pipeline. One existing module was modified. The top module and testbench were rewritten.
 
 | What | File | Lines |
 |------|------|-------|
-| Modified `Program_counter` (added `stall`) | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L1-L18) | 1–18 |
-| New `Forwarding_Unit` | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L255-L300) | 255–300 |
-| New `Mux3to1` | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L303-L321) | 303–321 |
-| New `Hazard_Detection_Unit` | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L324-L360) | 324–360 |
-| Rewritten `top` module | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L578-L965) | 578–965 |
-| New testbench | [Single_cycle.v](file:///c:/Users/ArunT/OneDrive/Desktop/RISC-V%20Core/Single_cycle.v#L969-L1171) | 969–1171 |
+| Modified `Program_counter` (added `stall`) | `Single_cycle.v` | 1–18 |
+| New `Forwarding_Unit` | `Single_cycle.v` | 255–300 |
+| New `Mux3to1` | `Single_cycle.v` | 303–321 |
+| New `Hazard_Detection_Unit` | `Single_cycle.v` | 324–360 |
+| Rewritten `top` module | `Single_cycle.v` | 578–965 |
+| New testbench | `Single_cycle.v` | 969–1171 |
 
 ---
 

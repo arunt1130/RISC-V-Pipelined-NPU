@@ -7,7 +7,7 @@ input [31:0] read_address;
 output [31:0] instruction_out;
 integer k;
 
-reg [31:0] I_Mem[63:0];
+reg [31:0] I_Mem[255:0];
 
     reg [8*256-1:0] fw_file;
     initial begin
@@ -21,8 +21,5 @@ reg [31:0] I_Mem[63:0];
     end
 
 assign instruction_out = I_Mem[read_address >> 2]; //right shifts by 2 bits (equivalent to dividing by 4)
-
-always @(posedge clk) begin
-end
 
 endmodule

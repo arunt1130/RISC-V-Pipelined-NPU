@@ -13,6 +13,8 @@ begin
         7'b0010011 : ImmExt = {{20{instruction[31]}}, instruction[31:20]}; // For I-type (arithmetic), same encoding as load immediate
         7'b0100011 : ImmExt = {{20{instruction[31]}}, instruction[31:25], instruction[11:7]}; // For S-type (store)
         7'b1100011 : ImmExt = {{19{instruction[31]}}, instruction[31], instruction [7], instruction[30:25], instruction[11:8],1'b0}; // For SB-type (branch)
+        7'b1100111 : ImmExt = {{20{instruction[31]}}, instruction[31:20]}; // For jalr — same I-type immediate encoding
+        7'b1101111 : ImmExt = {{11{instruction[31]}}, instruction[31], instruction[19:12], instruction[20], instruction[30:21], 1'b0}; // For UJ-type (jal)
         default    : ImmExt = 32'b0; // default to 0 for unknown opcodes
     endcase
 end

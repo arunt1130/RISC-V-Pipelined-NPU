@@ -12,9 +12,15 @@ module tb_cpu_e2e;
     reg reset;
     
     // Instantiate Top Pipeline
+    wire [31:0] host_tx_data;
+    wire        host_tx_valid;
+
     top uut(
         .clk(clk),
-        .reset(reset)
+        .reset(reset),
+        .host_tx_data(host_tx_data),
+        .host_tx_valid(host_tx_valid),
+        .host_rx_data(32'b0)
     );
     
     integer pass_count;
@@ -65,7 +71,7 @@ module tb_cpu_e2e;
         $display("==================================================");
         $display(" Results: %0d PASS, %0d FAIL", pass_count, fail_count);
         $display("==================================================");
-        $stop;
+        $finish;
     end
     
     // ── Debug Monitoring ──────────────────────────────────
@@ -81,7 +87,7 @@ module tb_cpu_e2e;
             
             // 3. Memory Writes (MEM Stage)
             // Ensure we aren't accidentally triggering the NPU addresses (256+)
-            if (uut.MemWrite_MEM && (uut.ALU_result_MEM < 8'd256)) begin
+            if (uut.MemWrite_MEM && (uut.ALU_result_MEM < 32'd256)) begin
                 $display("    >>> MEM WRITE: Mem[%0d] = %0d", uut.ALU_result_MEM, uut.RD2_MEM);
             end
             
@@ -96,7 +102,7 @@ module tb_cpu_e2e;
     task check;
         input [31:0] actual;
         input [31:0] expected;
-        input [63:0] label;
+        input [95:0] label;
         begin
             if (actual === expected) begin
                 $display(" PASS | %-12s | got %0d", label, actual);

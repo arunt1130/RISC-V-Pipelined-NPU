@@ -53,7 +53,7 @@ def parse_file(filepath):
     instructions = []
     pc = 0
     
-    with open(filepath, 'r') as f:
+    with open(filepath, 'r', encoding='utf-8') as f:
         lines = f.readlines()
         
     # Pass 1: Resolve pseudoinstructions and labels
